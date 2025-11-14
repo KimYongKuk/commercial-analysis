@@ -1,0 +1,237 @@
+# FastAPI 서버 메인 파일
+# OpenAI API와 연결된 실제 챗봇 서버!
+
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from openai import OpenAI
+from dotenv import load_dotenv
+from typing import Optional, List, Dict, Any
+import os
+
+# ============================================
+# 환경 변수 로드
+# ============================================
+# .env 파일에서 API 키 읽어오기
+load_dotenv()
+
+# OpenAI 클라이언트 생성
+# os.getenv("OPENAI_API_KEY") = .env 파일의 OPENAI_API_KEY 값을 읽음
+client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY")
+)
+
+# ============================================
+# FastAPI 앱 생성
+# ============================================
+app = FastAPI(
+    title="JobFlex Chatbot API",
+    description="상권 분석 챗봇 백엔드 (OpenAI 연결)",
+    version="2.0.0"  # OpenAI 연결 완료!
+)
+
+# ============================================
+# CORS 설정
+# ============================================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",  # React 개발 서버
+        "http://localhost:5174",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ============================================
+# Pydantic 모델 (데이터 검증)
+# ============================================
+class ChatRequest(BaseModel):
+    """
+    클라이언트에서 보내는 요청 형식
+    """
+    message: str  # 사용자 메시지
+    analysis_results: Optional[List[Dict[str, Any]]] = None  # 분석 결과 (선택적)
+    conversation_history: Optional[List[Dict[str, str]]] = None  # 대화 히스토리 (선택적)
+
+class ChatResponse(BaseModel):
+    """
+    서버에서 반환하는 응답 형식
+    """
+    reply: str    # AI 챗봇의 답변
+    message: str  # 원본 메시지 (디버깅용)
+
+# ============================================
+# 엔드포인트: 서버 상태 체크
+# ============================================
+@app.get("/")
+async def root():
+    return {
+        "message": "JobFlex Chatbot API (OpenAI 연결 완료!)",
+        "status": "healthy",
+        "version": "2.0.0",
+        "ai_model": "gpt-3.5-turbo"
+    }
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
+# ============================================
+# 메인 챗봇 엔드포인트 (OpenAI 연결!)
+# ============================================
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """
+    실제 OpenAI API를 사용한 챗봇 엔드포인트
+
+    작동 방식:
+    1. 사용자 메시지 받기
+    2. OpenAI API로 메시지 보내기
+    3. AI 응답 받아서 클라이언트에게 전달
+    """
+    try:
+        user_message = request.message
+        analysis_results = request.analysis_results
+        conversation_history = request.conversation_history
+
+        # 🔍 로깅: 받은 데이터 확인
+        print("\n" + "="*50)
+        print("📥 [Backend] 받은 사용자 메시지:", user_message)
+        print("📥 [Backend] 대화 히스토리 개수:", len(conversation_history) if conversation_history else 0)
+        if conversation_history:
+            print("📥 [Backend] 대화 히스토리:")
+            for i, msg in enumerate(conversation_history, 1):
+                role = msg.get('role', 'unknown')
+                content = msg.get('content', '')[:50]  # 처음 50자만
+                print(f"  {i}. [{role}] {content}...")
+        print("="*50 + "\n")
+
+        # ============================================
+        # System Prompt 생성 (분석 결과 포함)
+        # ============================================
+        base_prompt = """당신은 JobFlex의 상권 분석 전문 AI 어시스턴트입니다.
+
+역할:
+- 창업을 고려하는 사용자에게 상권 분석 도움
+- 업종, 위치, 예산 등에 대한 조언 제공
+- 친절하고 전문적인 톤으로 대화
+- 한국어로 응답
+
+응답 스타일:
+- 간결하고 명확하게 (2-3문장)
+- 실용적인 조언 중심
+- 이모지 적절히 사용 (😊, 📊, 💡 등)"""
+
+        # 분석 결과가 있으면 System Prompt에 추가
+        if analysis_results and len(analysis_results) > 0:
+            analysis_context = "\n\n=== 현재 분석된 입지 정보 ===\n"
+
+            for i, location in enumerate(analysis_results, 1):
+                analysis_context += f"\n[{i}순위] {location.get('name', '알 수 없음')}\n"
+                analysis_context += f"- 종합 점수: {location.get('score', 0)}점\n"
+
+                metrics = location.get('metrics', {})
+                analysis_context += f"- 입지 점수: {metrics.get('location', 0)}점\n"
+                analysis_context += f"- 유동인구 점수: {metrics.get('footTraffic', 0)}점\n"
+                analysis_context += f"- 임대료 점수: {metrics.get('rent', 0)}점\n"
+                analysis_context += f"- 경쟁업체 점수: {metrics.get('competition', 0)}점\n"
+
+                descriptions = location.get('descriptions', {})
+                if descriptions:
+                    analysis_context += f"\n상세 분석:\n"
+                    analysis_context += f"  • 입지: {descriptions.get('location', '')}\n"
+                    analysis_context += f"  • 유동인구: {descriptions.get('footTraffic', '')}\n"
+                    analysis_context += f"  • 임대료: {descriptions.get('rent', '')}\n"
+                    analysis_context += f"  • 경쟁업체: {descriptions.get('competition', '')}\n"
+
+            analysis_context += "\n위 분석 결과를 바탕으로 사용자의 질문에 구체적으로 답변해주세요."
+            system_prompt = base_prompt + analysis_context
+        else:
+            system_prompt = base_prompt
+
+        # ============================================
+        # 메시지 리스트 생성 (대화 히스토리 포함)
+        # ============================================
+        messages_list = [
+            {
+                "role": "system",
+                "content": system_prompt
+            }
+        ]
+
+        # 대화 히스토리가 있으면 추가 (최근 10개만)
+        if conversation_history and len(conversation_history) > 0:
+            messages_list.extend(conversation_history)
+
+        # 현재 사용자 메시지 추가
+        messages_list.append({
+            "role": "user",
+            "content": user_message
+        })
+
+        # 🔍 로깅: OpenAI에 전송할 메시지 개수
+        print("📤 [Backend] OpenAI에 전송할 메시지 개수:", len(messages_list))
+        print("📤 [Backend] 메시지 구성:")
+        for i, msg in enumerate(messages_list, 1):
+            role = msg.get('role', 'unknown')
+            content_preview = msg.get('content', '')[:50]
+            print(f"  {i}. [{role}] {content_preview}...")
+
+        # ============================================
+        # OpenAI API 호출
+        # ============================================
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # 사용할 AI 모델
+            messages=messages_list,  # 전체 대화 히스토리 포함
+            max_completion_tokens=500,  # 최대 응답 길이
+            temperature=0.7,        # 창의성 (0~1, 높을수록 창의적)
+        )
+
+        # AI 응답 추출
+        ai_reply = response.choices[0].message.content
+
+        # 🔍 로깅: OpenAI 응답
+        print("✅ [Backend] OpenAI 응답:", ai_reply[:100] if ai_reply else "None")
+        print("="*50 + "\n")
+
+        # 응답 반환
+        return ChatResponse(
+            reply=ai_reply,
+            message=user_message
+        )
+
+    except Exception as e:
+        # 에러 발생 시 처리
+        # 예: API 키 문제, 네트워크 오류 등
+        print(f"Error: {str(e)}")  # 서버 로그에 출력
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"챗봇 오류가 발생했습니다: {str(e)}"
+        )
+
+
+# ============================================
+# 서버 실행 방법
+# ============================================
+# cd backend
+# uvicorn main:app --reload --port 8000
+#
+# 또는 백그라운드 실행:
+# nohup uvicorn main:app --port 8000 &
+
+# ============================================
+# 코드 설명 요약
+# ============================================
+# 1. load_dotenv() - .env 파일에서 API 키 로드
+# 2. OpenAI(api_key=...) - OpenAI 클라이언트 생성
+# 3. client.chat.completions.create() - AI에게 메시지 보내기
+#    - model: 사용할 AI 모델 (gpt-3.5-turbo, gpt-4 등)
+#    - messages: 대화 내용
+#      - system: AI의 역할/성격 정의
+#      - user: 사용자 메시지
+#    - max_tokens: 최대 응답 길이
+#    - temperature: 창의성 (0=보수적, 1=창의적)
+# 4. response.choices[0].message.content - AI 응답 추출

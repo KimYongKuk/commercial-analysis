@@ -1,0 +1,11 @@
+{
+  "projectName": "상권분석 앱",
+  "description": "React 기반 상권 분석 애플리케이션",
+  "version": "1.0.0",
+  "settings": {
+    "language": "ko",
+    "framework": "React + TypeScript",
+    "styling": "Tailwind CSS",
+    "animation": "Framer Motion"
+  }
+}
