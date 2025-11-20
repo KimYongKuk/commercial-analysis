@@ -66,10 +66,11 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
     },
   ]);
   const [inputValue, setInputValue] = useState('');
-  const [conversationId, setConversationId] = useState('');  // MISO 대화 ID
-  const [isLoading, setIsLoading] = useState(false);  // 로딩 상태
 
-  const handleSend = async () => {
+  /* ============================================
+   * MISO API 호출 로직 (주석 처리)
+   * ============================================
+  const handleSendMISO = async () => {
     if (!inputValue.trim() || isLoading) return;
 
     const userMessage: Message = {
@@ -206,6 +207,77 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
       console.error('챗봇 API 호출 오류:', error);
     } finally {
       setIsLoading(false);
+    }
+  };
+  */
+
+  // OpenAI API 호출 로직
+  const handleSend = async () => {
+    if (!inputValue.trim()) return;
+
+    const userMessage: Message = {
+      id: messages.length + 1,
+      text: inputValue,
+      sender: 'user',
+      timestamp: new Date(),
+    };
+
+    setMessages([...messages, userMessage]);
+    const currentInput = inputValue;
+    setInputValue('');
+
+    // 최근 10개 대화만 선택 (첫 번째 환영 메시지 제외)
+    const MAX_HISTORY = 10;
+    const recentMessages = [...messages, userMessage]
+      .filter(msg => !(msg.id === 1 && msg.sender === 'ai'))
+      .slice(-MAX_HISTORY);
+
+    // OpenAI 형식으로 변환
+    const conversationHistory = recentMessages.map(msg => ({
+      role: msg.sender === 'user' ? 'user' : 'assistant',
+      content: msg.text
+    }));
+
+    console.log('📤 [Chatbot] 전송할 메시지:', currentInput);
+    console.log('📤 [Chatbot] 대화 히스토리 개수:', conversationHistory.length);
+    console.log('📤 [Chatbot] 대화 히스토리:', conversationHistory);
+
+    try {
+      const response = await fetch('http://localhost:8000/api/chat', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          message: currentInput,
+          analysis_results: locations,
+          conversation_history: conversationHistory,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('서버 응답 오류');
+      }
+
+      const data = await response.json();
+      console.log('📥 [Chatbot] AI 응답:', data.reply);
+
+      const aiResponse: Message = {
+        id: messages.length + 2,
+        text: data.reply,
+        sender: 'ai',
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, aiResponse]);
+    } catch (error) {
+      const errorMessage: Message = {
+        id: messages.length + 2,
+        text: '죄송합니다. 서버와 연결할 수 없습니다. 잠시 후 다시 시도해주세요.',
+        sender: 'ai',
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, errorMessage]);
+      console.error('챗봇 API 호출 오류:', error);
     }
   };
 

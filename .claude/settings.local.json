@@ -9,7 +9,9 @@
       "Bash(./venv/Scripts/python:*)",
       "Bash(npm run dev:*)",
       "Bash(timeout:*)",
-      "Bash(nul)"
+      "Bash(nul)",
+      "Bash(pip install:*)",
+      "Bash(python:*)"
     ],
     "deny": [],
     "ask": []
