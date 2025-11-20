@@ -3,11 +3,14 @@
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from openai import OpenAI
 from dotenv import load_dotenv
 from typing import Optional, List, Dict, Any
 import os
+import httpx
+import json
 
 # ============================================
 # 환경 변수 로드
@@ -212,6 +215,133 @@ async def chat(request: ChatRequest):
             detail=f"챗봇 오류가 발생했습니다: {str(e)}"
         )
 
+
+# ============================================
+# MISO API 프록시 엔드포인트 (Streaming)
+# ============================================
+
+class MisoChatRequest(BaseModel):
+    """
+    MISO 챗봇 요청 형식
+    """
+    query: str  # 사용자 질문
+    conversation_id: Optional[str] = ""  # 대화 ID (연속 대화용)
+    user: Optional[str] = "user-001"  # 사용자 식별자
+    inputs: Optional[Dict[str, Any]] = {}  # 추가 입력 변수
+
+# MISO API 에러 메시지 매핑
+MISO_ERROR_MESSAGES = {
+    "Conversation does not exists": "요청한 대화를 찾을 수 없습니다. 새 대화를 시작해주세요.",
+    "invalid_param": "잘못된 파라미터가 입력되었습니다.",
+    "app_unavailable": "앱 설정을 사용할 수 없습니다. 관리자에게 문의하세요.",
+    "provider_not_initialize": "모델 인증 정보가 설정되어 있지 않습니다.",
+    "provider_quota_exceeded": "API 호출 한도를 초과했습니다.",
+    "model_currently_not_support": "현재 모델을 사용할 수 없습니다.",
+    "completion_request_error": "텍스트 생성 요청에 실패하였습니다.",
+    "internal_server_error": "서버 내부 오류가 발생했습니다.",
+}
+
+async def stream_miso_response(query: str, conversation_id: str, user: str, inputs: dict):
+    """
+    MISO API SSE 스트리밍 응답을 프록시
+    """
+    miso_api_key = "app-yZ7SPwZItUQCpmOu3wyxPc0h"
+
+    if not miso_api_key:
+        error_msg = json.dumps({
+            "event": "error",
+            "message": "MISO_API_KEY 환경변수가 설정되지 않았습니다."
+        }, ensure_ascii=False)
+        yield f"data: {error_msg}\n\n"
+        return
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        try:
+            async with client.stream(
+                "POST",
+                "https://api.miso.gs/ext/v1/chat",
+                headers={
+                    "Authorization": f"Bearer {miso_api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "inputs": inputs,
+                    "query": query,
+                    "mode": "streaming",
+                    "conversation_id": conversation_id,
+                    "user": user
+                }
+            ) as response:
+                # 에러 응답 처리
+                if response.status_code != 200:
+                    error_body = await response.aread()
+                    try:
+                        error_data = json.loads(error_body)
+                        error_code = error_data.get("code", "unknown")
+                        error_detail = MISO_ERROR_MESSAGES.get(
+                            error_code,
+                            error_data.get("message", "알 수 없는 오류가 발생했습니다.")
+                        )
+                    except:
+                        error_detail = f"HTTP {response.status_code} 오류가 발생했습니다."
+
+                    error_msg = json.dumps({
+                        "event": "error",
+                        "message": error_detail
+                    }, ensure_ascii=False)
+                    yield f"data: {error_msg}\n\n"
+                    return
+
+                # SSE 스트리밍 응답 전달
+                async for line in response.aiter_lines():
+                    if line:
+                        yield f"{line}\n"
+                    else:
+                        yield "\n"
+
+        except httpx.TimeoutException:
+            error_msg = json.dumps({
+                "event": "error",
+                "message": "요청 시간이 초과되었습니다. 잠시 후 다시 시도해주세요."
+            }, ensure_ascii=False)
+            yield f"data: {error_msg}\n\n"
+        except httpx.RequestError as e:
+            error_msg = json.dumps({
+                "event": "error",
+                "message": f"네트워크 오류가 발생했습니다: {str(e)}"
+            }, ensure_ascii=False)
+            yield f"data: {error_msg}\n\n"
+
+@app.post("/api/miso-chat")
+async def miso_chat(request: MisoChatRequest):
+    """
+    MISO API 프록시 엔드포인트 (SSE Streaming)
+
+    - 클라이언트에서 이 엔드포인트를 호출하면
+    - MISO API로 요청을 전달하고
+    - SSE 스트리밍 응답을 그대로 전달
+    """
+    print("\n" + "="*50)
+    print("📥 [MISO Proxy] 받은 요청:")
+    print(f"  - query: {request.query[:50]}...")
+    print(f"  - conversation_id: {request.conversation_id}")
+    print(f"  - user: {request.user}")
+    print("="*50 + "\n")
+
+    return StreamingResponse(
+        stream_miso_response(
+            query=request.query,
+            conversation_id=request.conversation_id or "",
+            user=request.user or "user-001",
+            inputs=request.inputs or {}
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 # ============================================
 # 서버 실행 방법
