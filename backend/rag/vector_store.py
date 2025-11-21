@@ -38,7 +38,7 @@ class ChromaVectorStore:
         # 디렉토리 생성
         os.makedirs(persist_directory, exist_ok=True)
 
-        print(f"🗄️  ChromaDB 초기화 중...")
+        print(f"[DB]  ChromaDB 초기화 중...")
         print(f"   - 저장 경로: {persist_directory}")
         print(f"   - 컬렉션: {collection_name}")
 
@@ -53,9 +53,9 @@ class ChromaVectorStore:
                 name=collection_name,
                 metadata={"hnsw:space": "cosine"}  # 코사인 유사도 사용
             )
-            print(f"✅ ChromaDB 준비 완료 (문서 수: {self.collection.count()})")
+            print(f"[OK] ChromaDB 준비 완료 (문서 수: {self.collection.count()})")
         except Exception as e:
-            print(f"❌ ChromaDB 초기화 실패: {e}")
+            print(f"[ERROR] ChromaDB 초기화 실패: {e}")
             raise
 
     def add_documents(
@@ -100,10 +100,10 @@ class ChromaVectorStore:
                 metadatas=metadatas,
                 ids=ids
             )
-            print(f"✅ {len(texts)}개 문서 추가 완료")
+            print(f"[OK] {len(texts)}개 문서 추가 완료")
             return ids
         except Exception as e:
-            print(f"❌ 문서 추가 실패: {e}")
+            print(f"[ERROR] 문서 추가 실패: {e}")
             raise
 
     def search(
@@ -147,7 +147,7 @@ class ChromaVectorStore:
 
             return formatted_results
         except Exception as e:
-            print(f"❌ 검색 실패: {e}")
+            print(f"[ERROR] 검색 실패: {e}")
             raise
 
     def delete_documents(self, ids: List[str]) -> bool:
@@ -162,10 +162,10 @@ class ChromaVectorStore:
         """
         try:
             self.collection.delete(ids=ids)
-            print(f"✅ {len(ids)}개 문서 삭제 완료")
+            print(f"[OK] {len(ids)}개 문서 삭제 완료")
             return True
         except Exception as e:
-            print(f"❌ 문서 삭제 실패: {e}")
+            print(f"[ERROR] 문서 삭제 실패: {e}")
             return False
 
     def delete_collection(self) -> bool:
@@ -177,10 +177,10 @@ class ChromaVectorStore:
         """
         try:
             self.client.delete_collection(name=self.collection_name)
-            print(f"✅ 컬렉션 '{self.collection_name}' 삭제 완료")
+            print(f"[OK] 컬렉션 '{self.collection_name}' 삭제 완료")
             return True
         except Exception as e:
-            print(f"❌ 컬렉션 삭제 실패: {e}")
+            print(f"[ERROR] 컬렉션 삭제 실패: {e}")
             return False
 
     def get_document_count(self) -> int:
@@ -212,7 +212,7 @@ class ChromaVectorStore:
             )
             return results
         except Exception as e:
-            print(f"❌ 문서 조회 실패: {e}")
+            print(f"[ERROR] 문서 조회 실패: {e}")
             raise
 
 

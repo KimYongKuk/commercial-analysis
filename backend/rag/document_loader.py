@@ -55,7 +55,7 @@ class TextLoader:
 
             return [Document(page_content=content, metadata=metadata)]
         except Exception as e:
-            print(f"❌ 파일 로드 실패: {self.file_path}, 에러: {e}")
+            print(f"[ERROR] File load failed: {self.file_path}, Error: {e}")
             raise
 
 
@@ -92,7 +92,7 @@ class PDFLoader:
 
             return documents
         except Exception as e:
-            print(f"❌ PDF 로드 실패: {self.file_path}, 에러: {e}")
+            print(f"[ERROR] PDF load failed: {self.file_path}, Error: {e}")
             raise
 
 
@@ -123,7 +123,7 @@ class DOCXLoader:
 
             return [Document(page_content=content, metadata=metadata)]
         except Exception as e:
-            print(f"❌ DOCX 로드 실패: {self.file_path}, 에러: {e}")
+            print(f"[ERROR] DOCX load failed: {self.file_path}, Error: {e}")
             raise
 
 
@@ -156,16 +156,16 @@ class DirectoryLoader:
 
         for file_path in self.directory_path.glob(self.glob_pattern):
             if file_path.is_file() and file_path.suffix in self.supported_extensions:
-                print(f"📄 로딩 중: {file_path.name}")
+                print(f"[LOAD] Loading: {file_path.name}")
                 try:
                     loader = self._get_loader(str(file_path))
                     docs = loader.load()
                     documents.extend(docs)
                 except Exception as e:
-                    print(f"⚠️  파일 로드 실패 (건너뜀): {file_path.name}, 에러: {e}")
+                    print(f"[WARN] File load failed (skipped): {file_path.name}, Error: {e}")
                     continue
 
-        print(f"✅ 총 {len(documents)}개 문서 로드 완료")
+        print(f"[OK] Total {len(documents)} documents loaded")
         return documents
 
     def _get_loader(self, file_path: str):

@@ -1,9 +1,9 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Card } from './ui/card';
-import { MessageCircle, X, Send, Sparkles, Maximize2, Minimize2 } from 'lucide-react';
+import { MessageCircle, X, Send, Sparkles, Maximize2, Minimize2, ChevronDown } from 'lucide-react';
 import type { FormData } from '../App';
 
 type Location = {
@@ -37,12 +37,22 @@ type ChatbotProps = {
   onExpandToggle?: () => void;
 };
 
+type Source = {
+  content: string;
+  metadata: {
+    source: string;
+    [key: string]: any;
+  };
+  score: number;
+};
+
 type Message = {
   id: number;
   text: string;
   sender: 'user' | 'ai';
   timestamp: Date;
   isStreaming?: boolean;  // 스트리밍 중 여부
+  sources?: Source[];     // RAG 참고 문서
 };
 
 export default function Chatbot({ isOpen, onToggle, formData, locations, title, welcomeMessage, isExpanded: externalExpanded, onExpandToggle }: ChatbotProps) {
@@ -211,7 +221,7 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
   };
   */
 
-  // OpenAI API 호출 로직
+  // RAG API 호출 로직
   const handleSend = async () => {
     if (!inputValue.trim()) return;
 
@@ -240,17 +250,15 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
 
     console.log('📤 [Chatbot] 전송할 메시지:', currentInput);
     console.log('📤 [Chatbot] 대화 히스토리 개수:', conversationHistory.length);
-    console.log('📤 [Chatbot] 대화 히스토리:', conversationHistory);
 
     try {
-      const response = await fetch('http://localhost:8000/api/chat', {
+      const response = await fetch('http://localhost:8000/api/rag-chat', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
           message: currentInput,
-          analysis_results: locations,
           conversation_history: conversationHistory,
         }),
       });
@@ -261,12 +269,14 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
 
       const data = await response.json();
       console.log('📥 [Chatbot] AI 응답:', data.reply);
+      console.log('📥 [Chatbot] 참고 문서:', data.sources?.length || 0, '개');
 
       const aiResponse: Message = {
         id: messages.length + 2,
         text: data.reply,
         sender: 'ai',
         timestamp: new Date(),
+        sources: data.sources || [],
       };
       setMessages((prev) => [...prev, aiResponse]);
     } catch (error) {
@@ -457,6 +467,32 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
                       }`}
                     >
                       <p className="text-sm whitespace-pre-wrap">{message.text}</p>
+
+                      {/* 참고 문서 출처 표시 (AI 응답에만) */}
+                      {message.sender === 'ai' && message.sources && message.sources.length > 0 && (
+                        <div className="mt-3 pt-3 border-t border-gray-200">
+                          <p className="text-xs font-semibold text-gray-500 mb-2">참고 문서:</p>
+                          <div className="space-y-2">
+                            {message.sources.map((source, idx) => (
+                              <div key={idx} className="bg-gray-50 rounded p-2 text-xs">
+                                <div className="flex items-center justify-between mb-1">
+                                  <span className="font-medium text-gray-700">
+                                    {source.metadata.source.split('/').pop() || source.metadata.source}
+                                  </span>
+                                  <span className="text-gray-500">
+                                    유사도: {(source.score * 100).toFixed(1)}%
+                                  </span>
+                                </div>
+                                <p className="text-gray-600 line-clamp-2">
+                                  {source.content.length > 100
+                                    ? source.content.substring(0, 100) + '...'
+                                    : source.content}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </motion.div>
                 ))}

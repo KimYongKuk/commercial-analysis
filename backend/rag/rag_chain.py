@@ -51,7 +51,7 @@ class RAGChain:
         else:
             self.retriever = retriever
 
-        print(f"✅ RAG 파이프라인 준비 완료 (모델: {model_name})")
+        print(f"[OK] RAG 파이프라인 준비 완료 (모델: {model_name})")
 
     def create_prompt(
         self,
@@ -127,10 +127,10 @@ class RAGChain:
                 "query": "원본 질문"
             }
         """
-        print(f"\n🔍 RAG 파이프라인 시작: {query}")
+        print(f"\n[SEARCH] RAG 파이프라인 시작: {query}")
 
         # 1. 관련 문서 검색
-        print(f"📚 1단계: 문서 검색 (Top-{top_k})...")
+        print(f"[DOCS] 1단계: 문서 검색 (Top-{top_k})...")
         retrieved_docs = self.retriever.search(query, top_k=top_k)
 
         if not retrieved_docs:
@@ -143,11 +143,11 @@ class RAGChain:
         print(f"   ✓ {len(retrieved_docs)}개 문서 검색 완료")
 
         # 2. 프롬프트 생성
-        print(f"📝 2단계: 프롬프트 생성...")
+        print(f"[STEP] 2단계: 프롬프트 생성...")
         messages = self.create_prompt(query, retrieved_docs, conversation_history)
 
         # 3. LLM 호출
-        print(f"🤖 3단계: LLM 답변 생성...")
+        print(f"[AI] 3단계: LLM 답변 생성...")
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -171,7 +171,7 @@ class RAGChain:
             }
 
         except Exception as e:
-            print(f"❌ LLM 호출 실패: {e}")
+            print(f"[ERROR] LLM 호출 실패: {e}")
             return {
                 "answer": f"죄송합니다. 답변 생성 중 오류가 발생했습니다: {str(e)}",
                 "sources": retrieved_docs,
@@ -195,7 +195,7 @@ class RAGChain:
         Yields:
             답변 청크 또는 메타데이터
         """
-        print(f"\n🔍 RAG 파이프라인 시작 (스트리밍): {query}")
+        print(f"\n[SEARCH] RAG 파이프라인 시작 (스트리밍): {query}")
 
         # 1. 관련 문서 검색
         retrieved_docs = self.retriever.search(query, top_k=top_k)
@@ -234,7 +234,7 @@ class RAGChain:
                     }
 
         except Exception as e:
-            print(f"❌ LLM 스트리밍 실패: {e}")
+            print(f"[ERROR] LLM 스트리밍 실패: {e}")
             yield {
                 "type": "error",
                 "content": str(e)

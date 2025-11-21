@@ -31,14 +31,14 @@ class BGEEmbeddings:
         else:
             self.device = device
 
-        print(f"🚀 BGE-M3-KO 임베딩 모델 로딩 중... (device: {self.device})")
+        print(f"[INIT] BGE-M3-KO embedding model loading... (device: {self.device})")
 
         try:
             # SentenceTransformer 모델 로드
             self.model = SentenceTransformer(model_name, device=self.device)
-            print(f"✅ 모델 로드 완료: {model_name}")
+            print(f"[OK] 모델 로드 완료: {model_name}")
         except Exception as e:
-            print(f"❌ 모델 로드 실패: {e}")
+            print(f"[ERROR] 모델 로드 실패: {e}")
             raise
 
     def embed_query(self, text: str) -> List[float]:

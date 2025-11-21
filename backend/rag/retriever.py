@@ -78,7 +78,7 @@ class Retriever:
         k = top_k if top_k is not None else self.top_k
 
         # 쿼리 임베딩
-        print(f"🔍 검색 쿼리: {query}")
+        print(f"[SEARCH] 검색 쿼리: {query}")
         query_embedding = self.embeddings.embed_query(query)
 
         # 벡터 검색
@@ -112,7 +112,7 @@ class Retriever:
                     "rank": i + 1
                 })
 
-        print(f"✅ {len(formatted_results)}개 문서 검색 완료")
+        print(f"[OK] {len(formatted_results)}개 문서 검색 완료")
         return formatted_results
 
     def get_relevant_documents(self, query: str) -> List[Document]:

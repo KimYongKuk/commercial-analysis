@@ -12,6 +12,9 @@ import os
 import httpx
 import json
 
+# RAG 모듈 import
+from rag.rag_chain import RAGChain
+
 # ============================================
 # 환경 변수 로드
 # ============================================
@@ -23,6 +26,26 @@ load_dotenv()
 client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY")
 )
+
+# ============================================
+# RAG 시스템 초기화 (Lazy Loading)
+# ============================================
+# 첫 요청 시에만 초기화되어 시작 속도 개선
+rag_chain = None
+
+def get_rag_chain():
+    """RAG 체인 인스턴스 반환 (Lazy Loading)"""
+    global rag_chain
+    if rag_chain is None:
+        print("🚀 RAG 시스템 초기화 중... (첫 요청, 10~20초 소요)")
+        rag_chain = RAGChain(
+            openai_api_key=os.getenv("OPENAI_API_KEY"),
+            model_name="gpt-4o-mini",
+            temperature=0.7,
+            max_tokens=1000
+        )
+        print("✅ RAG 시스템 준비 완료!")
+    return rag_chain
 
 # ============================================
 # FastAPI 앱 생성
@@ -64,6 +87,15 @@ class ChatResponse(BaseModel):
     """
     reply: str    # AI 챗봇의 답변
     message: str  # 원본 메시지 (디버깅용)
+
+class RAGChatResponse(BaseModel):
+    """
+    RAG 챗봇 응답 형식 (참고 문서 포함)
+    """
+    reply: str                           # AI 챗봇의 답변
+    message: str                         # 원본 메시지
+    sources: Optional[List[Dict[str, Any]]] = []  # 참고 문서들
+    usage: Optional[Dict[str, int]] = None        # 토큰 사용량
 
 # ============================================
 # 엔드포인트: 서버 상태 체크
@@ -213,6 +245,72 @@ async def chat(request: ChatRequest):
         raise HTTPException(
             status_code=500,
             detail=f"챗봇 오류가 발생했습니다: {str(e)}"
+        )
+
+
+# ============================================
+# RAG 챗봇 엔드포인트 (지식 기반 답변)
+# ============================================
+@app.post("/api/rag-chat", response_model=RAGChatResponse)
+async def rag_chat(request: ChatRequest):
+    """
+    RAG (Retrieval-Augmented Generation) 기반 챗봇
+
+    작동 방식:
+    1. 사용자 질문 받기
+    2. 벡터 DB에서 관련 문서 검색 (BGE-M3-KO 임베딩)
+    3. 검색된 문서를 컨텍스트로 OpenAI API 호출
+    4. 지식 기반 답변 + 참고 문서 반환
+
+    장점:
+    - 업로드된 지식 문서 기반 정확한 답변
+    - 출처 제공 (신뢰성)
+
+    단점:
+    - 일반 챗봇보다 느림 (2~5초)
+    - 토큰 사용량 많음 (비용 약 10배)
+    """
+    try:
+        user_message = request.message
+        conversation_history = request.conversation_history
+
+        # 로깅
+        print("\n" + "="*50)
+        print("📥 [RAG Backend] 받은 사용자 메시지:", user_message)
+        print("📥 [RAG Backend] 대화 히스토리 개수:", len(conversation_history) if conversation_history else 0)
+        print("="*50 + "\n")
+
+        # RAG 체인 가져오기 (Lazy Loading)
+        rag = get_rag_chain()
+
+        # RAG 파이프라인 실행
+        result = rag.run(
+            query=user_message,
+            conversation_history=conversation_history,
+            top_k=3  # 상위 3개 문서 검색
+        )
+
+        # 로깅
+        print("✅ [RAG Backend] RAG 답변 생성 완료")
+        print(f"   - 참고 문서 수: {len(result.get('sources', []))}")
+        print(f"   - 사용 토큰: {result.get('usage', {}).get('total_tokens', 'N/A')}")
+        print("="*50 + "\n")
+
+        # 응답 반환
+        return RAGChatResponse(
+            reply=result["answer"],
+            message=user_message,
+            sources=result.get("sources", []),
+            usage=result.get("usage")
+        )
+
+    except Exception as e:
+        print(f"❌ [RAG Backend] 오류 발생: {str(e)}")
+        print("="*50 + "\n")
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"RAG 챗봇 오류가 발생했습니다: {str(e)}"
         )
 
 
