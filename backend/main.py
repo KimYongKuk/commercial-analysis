@@ -315,6 +315,85 @@ async def rag_chat(request: ChatRequest):
 
 
 # ============================================
+# RAG 챗봇 스트리밍 엔드포인트
+# ============================================
+
+async def stream_rag_response(
+    query: str,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
+    top_k: int = 3
+):
+    """
+    RAG 응답을 SSE 스트리밍으로 전송
+    """
+    try:
+        # RAG 체인 가져오기
+        rag = get_rag_chain()
+
+        # 스트리밍 실행
+        for chunk in rag.stream_run(
+            query=query,
+            conversation_history=conversation_history,
+            top_k=top_k
+        ):
+            # SSE 형식으로 데이터 전송
+            chunk_type = chunk.get("type")
+            content = chunk.get("content")
+
+            if chunk_type == "sources":
+                # 참고 문서 정보 전송
+                yield f"data: {json.dumps({'event': 'sources', 'sources': content}, ensure_ascii=False)}\n\n"
+            elif chunk_type == "answer":
+                # 답변 청크 전송
+                yield f"data: {json.dumps({'event': 'answer', 'content': content}, ensure_ascii=False)}\n\n"
+            elif chunk_type == "error":
+                # 에러 전송
+                yield f"data: {json.dumps({'event': 'error', 'message': content}, ensure_ascii=False)}\n\n"
+
+        # 스트리밍 완료
+        yield f"data: {json.dumps({'event': 'done'}, ensure_ascii=False)}\n\n"
+
+    except Exception as e:
+        error_msg = json.dumps({
+            "event": "error",
+            "message": f"RAG 스트리밍 오류: {str(e)}"
+        }, ensure_ascii=False)
+        yield f"data: {error_msg}\n\n"
+
+
+@app.post("/api/rag-chat-stream")
+async def rag_chat_stream(request: ChatRequest):
+    """
+    RAG 챗봇 스트리밍 엔드포인트 (SSE)
+
+    작동 방식:
+    1. 사용자 질문 받기
+    2. 벡터 DB에서 관련 문서 검색
+    3. 검색된 문서를 컨텍스트로 OpenAI API 스트리밍 호출
+    4. 실시간 답변 + 참고 문서 반환
+    """
+    print("\n" + "="*50)
+    print("📥 [RAG Stream] 받은 요청:")
+    print(f"  - query: {request.message[:50]}...")
+    print(f"  - history: {len(request.conversation_history) if request.conversation_history else 0}개")
+    print("="*50 + "\n")
+
+    return StreamingResponse(
+        stream_rag_response(
+            query=request.message,
+            conversation_history=request.conversation_history,
+            top_k=3
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
+
+# ============================================
 # MISO API 프록시 엔드포인트 (Streaming)
 # ============================================
 
