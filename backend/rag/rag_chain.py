@@ -10,6 +10,7 @@ import os
 from .retriever import Retriever
 from .embeddings import BGEEmbeddings
 from .vector_store import ChromaVectorStore
+from .mcp_client import TavilyMCPClient
 
 
 class RAGChain:
@@ -21,7 +22,9 @@ class RAGChain:
         retriever: Retriever = None,
         model_name: str = "gpt-4o-mini",
         temperature: float = 0.7,
-        max_tokens: int = 1000
+        max_tokens: int = 1000,
+        tavily_api_key: str = None,
+        enable_web_search: bool = True
     ):
         """
         RAG 파이프라인 초기화
@@ -32,6 +35,8 @@ class RAGChain:
             model_name: OpenAI 모델 이름
             temperature: 생성 온도 (0~2)
             max_tokens: 최대 토큰 수
+            tavily_api_key: Tavily API 키 (웹 검색용)
+            enable_web_search: 웹 검색 활성화 여부
         """
         # OpenAI API 키 설정
         if openai_api_key is None:
@@ -50,6 +55,26 @@ class RAGChain:
             self.retriever = Retriever()
         else:
             self.retriever = retriever
+
+        # Tavily MCP 클라이언트 초기화
+        self.tavily_mcp = None
+        self.enable_web_search = enable_web_search
+
+        if enable_web_search:
+            if tavily_api_key is None:
+                tavily_api_key = os.getenv("TAVILY_API_KEY")
+
+            if tavily_api_key:
+                try:
+                    self.tavily_mcp = TavilyMCPClient(tavily_api_key)
+                    print("🌐 Tavily 웹 검색 활성화")
+                except Exception as e:
+                    print(f"⚠️  Tavily 초기화 실패: {e}")
+                    print("   → 웹 검색 기능 비활성화")
+                    self.enable_web_search = False
+            else:
+                print("⚠️  TAVILY_API_KEY 없음 → 웹 검색 비활성화")
+                self.enable_web_search = False
 
         print(f"[OK] RAG 파이프라인 준비 완료 (모델: {model_name})")
 
@@ -106,48 +131,78 @@ class RAGChain:
 
         return messages
 
-    def run(
-        self,
-        query: str,
-        conversation_history: Optional[List[Dict[str, str]]] = None,
-        top_k: int = 3
-    ) -> Dict[str, Any]:
+    def _is_realtime_query(self, query: str) -> bool:
         """
-        RAG 파이프라인 실행
+        실시간 정보가 필요한 질문인지 판단
 
         Args:
             query: 사용자 질문
-            conversation_history: 대화 기록
-            top_k: 검색할 문서 개수
 
         Returns:
-            {
-                "answer": "LLM 답변",
-                "sources": [{...}, {...}],  # 참고 문서
-                "query": "원본 질문"
-            }
+            실시간 정보 필요 여부
         """
-        print(f"\n[SEARCH] RAG 파이프라인 시작: {query}")
+        realtime_keywords = [
+            "최신", "현재", "지금", "요즘", "트렌드",
+            "2025", "2024", "올해", "이번 달", "최근",
+            "오늘", "어제", "내일"
+        ]
+        query_lower = query.lower()
+        return any(keyword in query_lower for keyword in realtime_keywords)
 
-        # 1. 관련 문서 검색
-        print(f"[DOCS] 1단계: 문서 검색 (Top-{top_k})...")
-        retrieved_docs = self.retriever.search(query, top_k=top_k)
+    async def _tavily_search(
+        self,
+        query: str,
+        search_depth: str = "basic",
+        max_results: int = 3
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Tavily 웹 검색 실행
 
-        if not retrieved_docs:
-            return {
-                "answer": "죄송합니다. 관련된 정보를 찾을 수 없습니다. 다른 질문을 해주시겠어요?",
-                "sources": [],
-                "query": query
-            }
+        Args:
+            query: 검색 쿼리
+            search_depth: 검색 깊이
+            max_results: 최대 결과 수
 
-        print(f"   ✓ {len(retrieved_docs)}개 문서 검색 완료")
+        Returns:
+            검색 결과 또는 None
+        """
+        if not self.enable_web_search or not self.tavily_mcp:
+            return None
 
-        # 2. 프롬프트 생성
-        print(f"[STEP] 2단계: 프롬프트 생성...")
-        messages = self.create_prompt(query, retrieved_docs, conversation_history)
+        try:
+            result = await self.tavily_mcp.search(
+                query=query,
+                search_depth=search_depth,
+                max_results=max_results
+            )
+            return result
+        except Exception as e:
+            print(f"[ERROR] Tavily 검색 실패: {e}")
+            return None
 
-        # 3. LLM 호출
-        print(f"[AI] 3단계: LLM 답변 생성...")
+    def _generate_from_docs(
+        self,
+        local_docs: List[Dict[str, Any]],
+        query: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None
+    ) -> Dict[str, Any]:
+        """
+        로컬 문서만 사용하여 답변 생성 (기존 RAG 로직)
+
+        Args:
+            local_docs: 검색된 로컬 문서
+            query: 사용자 질문
+            conversation_history: 대화 기록
+
+        Returns:
+            답변 결과
+        """
+        print("[GENERATE] 전략: 로컬 문서만 사용 (RAG)")
+
+        # 프롬프트 생성
+        messages = self.create_prompt(query, local_docs, conversation_history)
+
+        # LLM 호출
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
@@ -157,11 +212,11 @@ class RAGChain:
             )
 
             answer = response.choices[0].message.content
-            print(f"   ✓ 답변 생성 완료 (토큰: {response.usage.total_tokens})")
 
             return {
                 "answer": answer,
-                "sources": retrieved_docs,
+                "sources": local_docs,
+                "web_search_used": False,
                 "query": query,
                 "usage": {
                     "prompt_tokens": response.usage.prompt_tokens,
@@ -174,9 +229,265 @@ class RAGChain:
             print(f"[ERROR] LLM 호출 실패: {e}")
             return {
                 "answer": f"죄송합니다. 답변 생성 중 오류가 발생했습니다: {str(e)}",
-                "sources": retrieved_docs,
+                "sources": local_docs,
+                "web_search_used": False,
                 "query": query
             }
+
+    def _generate_from_web(
+        self,
+        web_results: Dict[str, Any],
+        query: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None
+    ) -> Dict[str, Any]:
+        """
+        웹 검색 결과만 사용하여 답변 생성
+
+        Args:
+            web_results: Tavily 검색 결과
+            query: 사용자 질문
+            conversation_history: 대화 기록
+
+        Returns:
+            답변 결과
+        """
+        print("[GENERATE] 전략: 웹 검색 결과만 사용 (Tavily)")
+
+        # 웹 검색 결과를 컨텍스트로 변환
+        web_context = self.tavily_mcp.format_search_results_for_prompt(web_results, max_results=3)
+
+        # 시스템 프롬프트
+        system_prompt = """당신은 상권 분석 및 창업 컨설팅 전문가입니다.
+웹 검색 결과를 바탕으로 정확하고 유용한 답변을 제공해주세요.
+
+답변 시 주의사항:
+1. 웹 검색 결과의 내용을 기반으로 답변하되, 자연스럽게 설명해주세요.
+2. 필요시 출처(URL)를 언급해주세요.
+3. 최신 정보를 반영하여 구체적이고 실용적인 조언을 제공해주세요.
+"""
+
+        # 사용자 프롬프트
+        user_prompt = f"""[웹 검색 결과]
+{web_context}
+
+[사용자 질문]
+{query}
+
+위 웹 검색 결과를 바탕으로 사용자의 질문에 답변해주세요.
+"""
+
+        # 메시지 구성
+        messages = [{"role": "system", "content": system_prompt}]
+
+        if conversation_history:
+            messages.extend(conversation_history)
+
+        messages.append({"role": "user", "content": user_prompt})
+
+        # LLM 호출
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens
+            )
+
+            answer = response.choices[0].message.content
+
+            return {
+                "answer": answer,
+                "sources": [],
+                "web_results": web_results,
+                "web_search_used": True,
+                "query": query,
+                "usage": {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "total_tokens": response.usage.total_tokens
+                }
+            }
+
+        except Exception as e:
+            print(f"[ERROR] LLM 호출 실패: {e}")
+            return {
+                "answer": f"죄송합니다. 답변 생성 중 오류가 발생했습니다: {str(e)}",
+                "sources": [],
+                "web_results": web_results,
+                "web_search_used": True,
+                "query": query
+            }
+
+    def _generate_hybrid(
+        self,
+        local_docs: List[Dict[str, Any]],
+        web_results: Dict[str, Any],
+        query: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None
+    ) -> Dict[str, Any]:
+        """
+        로컬 문서 + 웹 검색 결과 결합하여 답변 생성
+
+        Args:
+            local_docs: 로컬 검색 결과
+            web_results: 웹 검색 결과
+            query: 사용자 질문
+            conversation_history: 대화 기록
+
+        Returns:
+            답변 결과
+        """
+        print("[GENERATE] 전략: 하이브리드 (로컬 + 웹)")
+
+        # 로컬 문서 컨텍스트
+        local_context = self.retriever.format_documents_for_prompt(local_docs)
+
+        # 웹 검색 컨텍스트
+        web_context = self.tavily_mcp.format_search_results_for_prompt(web_results, max_results=2)
+
+        # 시스템 프롬프트
+        system_prompt = """당신은 상권 분석 및 창업 컨설팅 전문가입니다.
+로컬 지식 데이터베이스와 최신 웹 검색 결과를 모두 활용하여 정확하고 유용한 답변을 제공해주세요.
+
+답변 시 주의사항:
+1. 로컬 문서(내부 자료)와 웹 검색 결과(최신 정보)를 균형있게 활용하세요.
+2. 정보의 출처(로컬 문서 vs 웹)를 명확히 구분해주세요.
+3. 최신 트렌드와 기본 지식을 결합하여 실용적인 조언을 제공하세요.
+"""
+
+        # 사용자 프롬프트
+        user_prompt = f"""[내부 참고 문서]
+{local_context}
+
+[최신 웹 검색 결과]
+{web_context}
+
+[사용자 질문]
+{query}
+
+위의 내부 참고 문서와 최신 웹 검색 결과를 종합하여 사용자의 질문에 답변해주세요.
+"""
+
+        # 메시지 구성
+        messages = [{"role": "system", "content": system_prompt}]
+
+        if conversation_history:
+            messages.extend(conversation_history)
+
+        messages.append({"role": "user", "content": user_prompt})
+
+        # LLM 호출
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens
+            )
+
+            answer = response.choices[0].message.content
+
+            return {
+                "answer": answer,
+                "sources": local_docs,
+                "web_results": web_results,
+                "web_search_used": True,
+                "query": query,
+                "usage": {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "total_tokens": response.usage.total_tokens
+                }
+            }
+
+        except Exception as e:
+            print(f"[ERROR] LLM 호출 실패: {e}")
+            return {
+                "answer": f"죄송합니다. 답변 생성 중 오류가 발생했습니다: {str(e)}",
+                "sources": local_docs,
+                "web_results": web_results,
+                "web_search_used": True,
+                "query": query
+            }
+
+    async def run(
+        self,
+        query: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+        top_k: int = 3
+    ) -> Dict[str, Any]:
+        """
+        RAG 파이프라인 실행 (Tavily 웹 검색 통합)
+
+        Args:
+            query: 사용자 질문
+            conversation_history: 대화 기록
+            top_k: 검색할 문서 개수
+
+        Returns:
+            {
+                "answer": "LLM 답변",
+                "sources": [{...}, {...}],  # 참고 문서
+                "web_results": {...},       # 웹 검색 결과 (있으면)
+                "web_search_used": bool,    # 웹 검색 사용 여부
+                "query": "원본 질문"
+            }
+        """
+        print(f"\n[SEARCH] RAG 파이프라인 시작: {query}")
+
+        # 1. 로컬 문서 검색
+        print(f"[DOCS] 1단계: 로컬 문서 검색 (Top-{top_k})...")
+        local_docs = self.retriever.search(query, top_k=top_k)
+        print(f"   ✓ {len(local_docs)}개 문서 검색 완료")
+
+        # 2. 실시간 정보 필요 여부 판단
+        needs_realtime = self._is_realtime_query(query)
+        print(f"[CHECK] 실시간 정보 필요: {'✅ 예' if needs_realtime else '❌ 아니오'}")
+
+        # 3. 전략 선택 및 실행
+        if local_docs and not needs_realtime:
+            # Case A: 로컬 문서 충분 + 실시간 불필요 → 로컬만 사용
+            print(f"[STRATEGY] Case A: 로컬 문서만 사용")
+            return self._generate_from_docs(local_docs, query, conversation_history)
+
+        elif needs_realtime:
+            # Case D: 실시간 필요 → 하이브리드 또는 웹만
+            print(f"[STRATEGY] Case D: 실시간 정보 필요 → 웹 검색 실행")
+            web_results = await self._tavily_search(query, search_depth="basic")
+
+            if web_results:
+                if local_docs:
+                    # 로컬 + 웹 하이브리드
+                    return self._generate_hybrid(local_docs, web_results, query, conversation_history)
+                else:
+                    # 웹만
+                    return self._generate_from_web(web_results, query, conversation_history)
+            else:
+                # 웹 검색 실패 → 로컬만 사용 (있으면)
+                if local_docs:
+                    return self._generate_from_docs(local_docs, query, conversation_history)
+                else:
+                    return {
+                        "answer": "죄송합니다. 관련된 정보를 찾을 수 없습니다.",
+                        "sources": [],
+                        "web_search_used": False,
+                        "query": query
+                    }
+
+        else:
+            # Case C: 로컬 없음 + 실시간 불필요 → Tavily 폴백
+            print(f"[STRATEGY] Case C: 로컬 문서 없음 → Tavily 폴백")
+            web_results = await self._tavily_search(query, search_depth="basic")
+
+            if web_results:
+                return self._generate_from_web(web_results, query, conversation_history)
+            else:
+                return {
+                    "answer": "죄송합니다. 관련된 정보를 찾을 수 없습니다.",
+                    "sources": [],
+                    "web_search_used": False,
+                    "query": query
+                }
 
     def stream_run(
         self,
