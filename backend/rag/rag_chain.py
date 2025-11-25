@@ -489,14 +489,14 @@ class RAGChain:
                     "query": query
                 }
 
-    def stream_run(
+    async def stream_run(
         self,
         query: str,
         conversation_history: Optional[List[Dict[str, str]]] = None,
         top_k: int = 3
     ):
         """
-        RAG 파이프라인 스트리밍 실행
+        RAG 파이프라인 스트리밍 실행 (Tavily 웹 검색 통합)
 
         Args:
             query: 사용자 질문
@@ -508,26 +508,248 @@ class RAGChain:
         """
         print(f"\n[SEARCH] RAG 파이프라인 시작 (스트리밍): {query}")
 
-        # 1. 관련 문서 검색
-        retrieved_docs = self.retriever.search(query, top_k=top_k)
+        # 1. 로컬 문서 검색
+        print(f"[DOCS] 1단계: 로컬 문서 검색 (Top-{top_k})...")
+        local_docs = self.retriever.search(query, top_k=top_k)
+        print(f"   ✓ {len(local_docs)}개 문서 검색 완료")
 
-        if not retrieved_docs:
+        # 2. 실시간 정보 필요 여부 판단
+        needs_realtime = self._is_realtime_query(query)
+        print(f"[CHECK] 실시간 정보 필요: {'✅ 예' if needs_realtime else '❌ 아니오'}")
+
+        # 3. 전략 선택 및 실행
+        if local_docs and not needs_realtime:
+            # Case A: 로컬 문서만 사용
+            print(f"[STRATEGY] Case A: 로컬 문서만 사용 (스트리밍)")
+            yield {"type": "sources", "content": local_docs}
+            async for chunk in self._stream_from_docs(local_docs, query, conversation_history):
+                yield chunk
+
+        elif needs_realtime:
+            # Case D: 실시간 필요 → 웹 검색
+            print(f"[STRATEGY] Case D: 실시간 정보 필요 → 웹 검색 실행")
+            web_results = await self._tavily_search(query, search_depth="advanced")
+
+            if web_results:
+                if local_docs:
+                    # 하이브리드
+                    print(f"[STREAM] 하이브리드 스트리밍 시작")
+                    yield {"type": "sources", "content": local_docs}
+                    yield {"type": "web_results", "content": web_results}
+                    async for chunk in self._stream_hybrid(local_docs, web_results, query, conversation_history):
+                        yield chunk
+                else:
+                    # 웹만
+                    print(f"[STREAM] 웹 검색 결과 스트리밍 시작")
+                    yield {"type": "web_results", "content": web_results}
+                    async for chunk in self._stream_from_web(web_results, query, conversation_history):
+                        yield chunk
+            else:
+                # 웹 검색 실패 → 로컬만 (있으면)
+                if local_docs:
+                    yield {"type": "sources", "content": local_docs}
+                    async for chunk in self._stream_from_docs(local_docs, query, conversation_history):
+                        yield chunk
+                else:
+                    yield {
+                        "type": "answer",
+                        "content": "죄송합니다. 관련된 정보를 찾을 수 없습니다."
+                    }
+
+        else:
+            # Case C: 로컬 없음 → Tavily 폴백
+            print(f"[STRATEGY] Case C: 로컬 문서 없음 → Tavily 폴백")
+            web_results = await self._tavily_search(query, search_depth="basic")
+
+            if web_results:
+                yield {"type": "web_results", "content": web_results}
+                async for chunk in self._stream_from_web(web_results, query, conversation_history):
+                    yield chunk
+            else:
+                yield {
+                    "type": "answer",
+                    "content": "죄송합니다. 관련된 정보를 찾을 수 없습니다."
+                }
+
+    async def _stream_from_docs(
+        self,
+        local_docs: List[Dict[str, Any]],
+        query: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None
+    ):
+        """
+        로컬 문서만 사용하여 스트리밍 답변 생성
+
+        Args:
+            local_docs: 검색된 로컬 문서
+            query: 사용자 질문
+            conversation_history: 대화 기록
+
+        Yields:
+            답변 청크
+        """
+        print("[STREAM] 로컬 문서 기반 스트리밍")
+        
+        # 프롬프트 생성
+        messages = self.create_prompt(query, local_docs, conversation_history)
+
+        # LLM 스트리밍 호출
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                stream=True
+            )
+
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield {
+                        "type": "answer",
+                        "content": chunk.choices[0].delta.content
+                    }
+
+        except Exception as e:
+            print(f"[ERROR] LLM 스트리밍 실패: {e}")
             yield {
-                "type": "answer",
-                "content": "죄송합니다. 관련된 정보를 찾을 수 없습니다."
+                "type": "error",
+                "content": str(e)
             }
-            return
 
-        # 검색된 문서 정보 먼저 반환
-        yield {
-            "type": "sources",
-            "content": retrieved_docs
-        }
+    async def _stream_from_web(
+        self,
+        web_results: Dict[str, Any],
+        query: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None
+    ):
+        """
+        웹 검색 결과만 사용하여 스트리밍 답변 생성
 
-        # 2. 프롬프트 생성
-        messages = self.create_prompt(query, retrieved_docs, conversation_history)
+        Args:
+            web_results: Tavily 검색 결과
+            query: 사용자 질문
+            conversation_history: 대화 기록
 
-        # 3. LLM 스트리밍 호출
+        Yields:
+            답변 청크
+        """
+        print("[STREAM] 웹 검색 결과 기반 스트리밍")
+
+        # 웹 검색 결과를 컨텍스트로 변환
+        web_context = self.tavily_mcp.format_search_results_for_prompt(web_results, max_results=3)
+
+        # 시스템 프롬프트
+        system_prompt = """당신은 상권 분석 및 창업 컨설팅 전문가입니다.
+웹 검색 결과를 바탕으로 정확하고 유용한 답변을 제공해주세요.
+
+답변 시 주의사항:
+1. 웹 검색 결과의 내용을 기반으로 답변하되, 자연스럽게 설명해주세요.
+2. 필요시 출처(URL)를 언급해주세요.
+3. 최신 정보를 반영하여 구체적이고 실용적인 조언을 제공해주세요.
+"""
+
+        # 사용자 프롬프트
+        user_prompt = f"""[웹 검색 결과]
+{web_context}
+
+[사용자 질문]
+{query}
+
+위 웹 검색 결과를 바탕으로 사용자의 질문에 답변해주세요.
+"""
+
+        # 메시지 구성
+        messages = [{"role": "system", "content": system_prompt}]
+
+        if conversation_history:
+            messages.extend(conversation_history)
+
+        messages.append({"role": "user", "content": user_prompt})
+
+        # LLM 스트리밍 호출
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                stream=True
+            )
+
+            for chunk in stream:
+                if chunk.choices[0].delta.content:
+                    yield {
+                        "type": "answer",
+                        "content": chunk.choices[0].delta.content
+                    }
+
+        except Exception as e:
+            print(f"[ERROR] LLM 스트리밍 실패: {e}")
+            yield {
+                "type": "error",
+                "content": str(e)
+            }
+
+    async def _stream_hybrid(
+        self,
+        local_docs: List[Dict[str, Any]],
+        web_results: Dict[str, Any],
+        query: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None
+    ):
+        """
+        로컬 문서 + 웹 검색 결과 결합하여 스트리밍 답변 생성
+
+        Args:
+            local_docs: 로컬 검색 결과
+            web_results: 웹 검색 결과
+            query: 사용자 질문
+            conversation_history: 대화 기록
+
+        Yields:
+            답변 청크
+        """
+        print("[STREAM] 하이브리드 (로컬 + 웹) 스트리밍")
+
+        # 로컬 문서 컨텍스트
+        local_context = self.retriever.format_documents_for_prompt(local_docs)
+
+        # 웹 검색 컨텍스트
+        web_context = self.tavily_mcp.format_search_results_for_prompt(web_results, max_results=2)
+
+        # 시스템 프롬프트
+        system_prompt = """당신은 상권 분석 및 창업 컨설팅 전문가입니다.
+로컬 지식 데이터베이스와 최신 웹 검색 결과를 모두 활용하여 정확하고 유용한 답변을 제공해주세요.
+
+답변 시 주의사항:
+1. 로컬 문서(내부 자료)와 웹 검색 결과(최신 정보)를 균형있게 활용하세요.
+2. 정보의 출처(로컬 문서 vs 웹)를 명확히 구분해주세요.
+3. 최신 트렌드와 기본 지식을 결합하여 실용적인 조언을 제공하세요.
+"""
+
+        # 사용자 프롬프트
+        user_prompt = f"""[내부 참고 문서]
+{local_context}
+
+[최신 웹 검색 결과]
+{web_context}
+
+[사용자 질문]
+{query}
+
+위의 내부 참고 문서와 최신 웹 검색 결과를 종합하여 사용자의 질문에 답변해주세요.
+"""
+
+        # 메시지 구성
+        messages = [{"role": "system", "content": system_prompt}]
+
+        if conversation_history:
+            messages.extend(conversation_history)
+
+        messages.append({"role": "user", "content": user_prompt})
+
+        # LLM 스트리밍 호출
         try:
             stream = self.client.chat.completions.create(
                 model=self.model_name,

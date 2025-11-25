@@ -284,7 +284,7 @@ async def rag_chat(request: ChatRequest):
         rag = get_rag_chain()
 
         # RAG 파이프라인 실행
-        result = rag.run(
+        result = await rag.run(
             query=user_message,
             conversation_history=conversation_history,
             top_k=3  # 상위 3개 문서 검색
@@ -330,8 +330,8 @@ async def stream_rag_response(
         # RAG 체인 가져오기
         rag = get_rag_chain()
 
-        # 스트리밍 실행
-        for chunk in rag.stream_run(
+        # 스트리밍 실행 (async for 사용)
+        async for chunk in rag.stream_run(
             query=query,
             conversation_history=conversation_history,
             top_k=top_k
@@ -343,6 +343,9 @@ async def stream_rag_response(
             if chunk_type == "sources":
                 # 참고 문서 정보 전송
                 yield f"data: {json.dumps({'event': 'sources', 'sources': content}, ensure_ascii=False)}\n\n"
+            elif chunk_type == "web_results":
+                # 웹 검색 결과 전송
+                yield f"data: {json.dumps({'event': 'web_results', 'web_results': content}, ensure_ascii=False)}\n\n"
             elif chunk_type == "answer":
                 # 답변 청크 전송
                 yield f"data: {json.dumps({'event': 'answer', 'content': content}, ensure_ascii=False)}\n\n"
