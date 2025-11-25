@@ -77,6 +77,12 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
   ]);
   const [inputValue, setInputValue] = useState('');
 
+  // 스크롤 관련 상태 및 ref
+  const [isAutoScroll, setIsAutoScroll] = useState(true);
+  const [showScrollButton, setShowScrollButton] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+
   /* ============================================
    * MISO API 호출 로직 (주석 처리)
    * ============================================
@@ -221,7 +227,7 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
   };
   */
 
-  // RAG API 호출 로직
+  // RAG API 스트리밍 호출 로직
   const handleSend = async () => {
     if (!inputValue.trim()) return;
 
@@ -248,11 +254,11 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
       content: msg.text
     }));
 
-    console.log('📤 [Chatbot] 전송할 메시지:', currentInput);
+    console.log('📤 [Chatbot] RAG 스트리밍 시작:', currentInput);
     console.log('📤 [Chatbot] 대화 히스토리 개수:', conversationHistory.length);
 
     try {
-      const response = await fetch('http://localhost:8000/api/rag-chat', {
+      const response = await fetch('http://localhost:8000/api/rag-chat-stream', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -267,18 +273,87 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
         throw new Error('서버 응답 오류');
       }
 
-      const data = await response.json();
-      console.log('📥 [Chatbot] AI 응답:', data.reply);
-      console.log('📥 [Chatbot] 참고 문서:', data.sources?.length || 0, '개');
-
-      const aiResponse: Message = {
-        id: messages.length + 2,
-        text: data.reply,
+      // 스트리밍 응답을 위한 AI 메시지 생성
+      const aiMessageId = messages.length + 2;
+      const aiMessage: Message = {
+        id: aiMessageId,
+        text: '',
         sender: 'ai',
         timestamp: new Date(),
-        sources: data.sources || [],
+        isStreaming: true,
+        sources: [],
       };
-      setMessages((prev) => [...prev, aiResponse]);
+      setMessages((prev) => [...prev, aiMessage]);
+
+      // SSE 스트리밍 처리
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+      let currentContent = '';
+      let currentSources: Source[] = [];
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          const lines = chunk.split('\n');
+
+          for (const line of lines) {
+            if (line.startsWith('data:')) {
+              try {
+                const jsonStr = line.slice(5).trim();
+                if (!jsonStr) continue;
+
+                const data = JSON.parse(jsonStr);
+
+                // 이벤트 타입에 따른 처리
+                if (data.event === 'sources') {
+                  // 참고 문서 정보 저장 (나중에 표시)
+                  currentSources = data.sources || [];
+                  console.log('📥 [Chatbot] 참고 문서:', currentSources.length, '개');
+                } else if (data.event === 'answer') {
+                  // 답변 청크 추가 (참고 문서는 아직 표시 안 함)
+                  currentContent += data.content;
+                  setMessages((prev: Message[]) =>
+                    prev.map((msg: Message) =>
+                      msg.id === aiMessageId
+                        ? { ...msg, text: currentContent }
+                        : msg
+                    )
+                  );
+                } else if (data.event === 'error') {
+                  // 에러 처리
+                  currentContent = data.message || '오류가 발생했습니다.';
+                  setMessages((prev: Message[]) =>
+                    prev.map((msg: Message) =>
+                      msg.id === aiMessageId
+                        ? { ...msg, text: currentContent, isStreaming: false }
+                        : msg
+                    )
+                  );
+                  break;
+                } else if (data.event === 'done') {
+                  // 스트리밍 완료
+                  console.log('📥 [Chatbot] RAG 스트리밍 완료');
+                }
+              } catch (e) {
+                console.error('JSON 파싱 오류:', e, line);
+              }
+            }
+          }
+        }
+      }
+
+      // 스트리밍 완료 후 참고 문서 추가
+      setMessages((prev: Message[]) =>
+        prev.map((msg: Message) =>
+          msg.id === aiMessageId
+            ? { ...msg, isStreaming: false, sources: currentSources }
+            : msg
+        )
+      );
+
     } catch (error) {
       const errorMessage: Message = {
         id: messages.length + 2,
@@ -371,6 +446,30 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
     }
   };
 
+  // 스크롤 위치 감지
+  const handleScroll = () => {
+    const container = messagesContainerRef.current;
+    if (container) {
+      const isNearBottom =
+        container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+      setIsAutoScroll(isNearBottom);
+      setShowScrollButton(!isNearBottom);
+    }
+  };
+
+  // 맨 아래로 스크롤
+  const scrollToBottom = () => {
+    setIsAutoScroll(true);
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  // 자동 스크롤 (메시지가 추가되고 isAutoScroll이 true일 때만)
+  useEffect(() => {
+    if (isAutoScroll) {
+      messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [messages, isAutoScroll]);
+
   return (
     <>
       {/* Chat Button - 플로팅 모드에서만 표시 */}
@@ -451,7 +550,11 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
               </div>
 
               {/* Messages */}
-              <div className={`overflow-y-auto p-4 space-y-4 bg-gray-50 ${isExpanded ? 'flex-1' : 'h-96'}`}>
+              <div
+                ref={messagesContainerRef}
+                onScroll={handleScroll}
+                className={`overflow-y-auto p-4 space-y-4 bg-gray-50 ${isExpanded ? 'flex-1' : 'h-96'} relative`}
+              >
                 {messages.map((message) => (
                   <motion.div
                     key={message.id}
@@ -496,6 +599,29 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
                     </div>
                   </motion.div>
                 ))}
+
+                {/* 스크롤 타겟용 더미 요소 */}
+                <div ref={messagesEndRef} />
+
+                {/* 맨 아래로 스크롤 버튼 */}
+                <AnimatePresence>
+                  {showScrollButton && (
+                    <motion.div
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: 10 }}
+                      className="absolute bottom-4 right-4"
+                    >
+                      <Button
+                        onClick={scrollToBottom}
+                        size="sm"
+                        className="rounded-full shadow-lg bg-orange-500 hover:bg-orange-600 text-white w-10 h-10 p-0 flex items-center justify-center"
+                      >
+                        <ChevronDown className="w-5 h-5" />
+                      </Button>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
 
               {/* Input */}
