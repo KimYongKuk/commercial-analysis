@@ -536,6 +536,62 @@ class RAGChain:
                 "query": query
             }
 
+    def _generate_general_response(
+        self,
+        query: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None
+    ) -> Dict[str, Any]:
+        """
+        참고 자료 없이 LLM의 일반 지식으로 답변 생성
+        """
+        print("[GENERATE] 전략: 일반 대화 (No Context)")
+
+        # 시스템 프롬프트 (일반 대화용)
+        system_prompt = """당신은 친절하고 전문적인 AI 어시스턴트입니다.
+사용자의 질문에 대해 당신이 가진 일반적인 지식을 바탕으로 답변해주세요.
+상권 분석이나 창업과 관련된 질문이라면 일반적인 조언을 제공하고,
+그 외의 질문(인사, 일반 상식 등)에는 자연스럽게 대화하세요."""
+
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        if conversation_history:
+            messages.extend(conversation_history)
+            
+        messages.append({"role": "user", "content": query})
+
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens
+            )
+
+            answer = response.choices[0].message.content
+
+            return {
+                "answer": answer,
+                "sources": [],
+                "mcp_results": {},
+                "web_search_used": False,
+                "query": query,
+                "usage": {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "total_tokens": response.usage.total_tokens
+                }
+            }
+
+        except Exception as e:
+            print(f"[ERROR] LLM 호출 실패: {e}")
+            return {
+                "answer": f"죄송합니다. 답변 생성 중 오류가 발생했습니다: {str(e)}",
+                "sources": [],
+                "mcp_results": {},
+                "web_search_used": False,
+                "query": query
+            }
+
     async def run(
         self,
         query: str,
@@ -617,16 +673,9 @@ class RAGChain:
             return result
 
         else:
-            # Case C: 정보 없음
-            print(f"[STRATEGY] 정보 없음")
-            return {
-                "answer": "죄송합니다. 관련된 정보를 찾을 수 없습니다.",
-                "sources": [],
-                "mcp_results": {},
-                "tools_used": [],
-                "web_search_used": False,
-                "query": query
-            }
+            # Case C: 정보 없음 -> LLM 일반 지식으로 답변
+            print(f"[STRATEGY] 정보 없음 -> 일반 대화 모드")
+            return self._generate_general_response(query, conversation_history)
 
     async def stream_run(
         self,
@@ -697,12 +746,14 @@ class RAGChain:
                 yield chunk
 
         else:
-            # Case C: 정보 없음
-            print(f"[STREAM] 정보 없음")
+            # Case C: 정보 없음 -> LLM 일반 지식으로 답변
+            print(f"[STREAM] 정보 없음 -> 일반 대화 모드 (스트리밍)")
             yield {
                 "type": "answer",
-                "content": "죄송합니다. 관련된 정보를 찾을 수 없습니다."
+                "content": ""
             }
+            async for chunk in self._stream_general_response(query, conversation_history):
+                yield chunk
 
     async def _stream_from_docs(
         self,
@@ -798,6 +849,77 @@ class RAGChain:
 
         # LLM 스트리밍 호출
         try:
+            stream = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                stream=True
+            )
+
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        yield {
+                            "type": "answer",
+                            "content": content
+                        }
+
+        except Exception as e:
+            print(f"[ERROR] LLM 스트리밍 실패: {e}")
+            yield {
+                "type": "error",
+                "content": str(e)
+            }
+
+    async def _stream_general_response(
+        self,
+        query: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None
+    ):
+        """
+        참고 자료 없이 LLM의 일반 지식으로 스트리밍 답변 생성
+        """
+        print("[STREAM] 일반 대화 기반 스트리밍")
+
+        # 시스템 프롬프트 (일반 대화용)
+        system_prompt = """당신은 친절하고 전문적인 AI 어시스턴트입니다.
+사용자의 질문에 대해 당신이 가진 일반적인 지식을 바탕으로 답변해주세요.
+상권 분석이나 창업과 관련된 질문이라면 일반적인 조언을 제공하고,
+그 외의 질문(인사, 일반 상식 등)에는 자연스럽게 대화하세요."""
+
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        if conversation_history:
+            messages.extend(conversation_history)
+            
+        messages.append({"role": "user", "content": query})
+
+        try:
+            stream = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                stream=True
+            )
+
+            for chunk in stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        yield {
+                            "type": "answer",
+                            "content": content
+                        }
+
+        except Exception as e:
+            print(f"[ERROR] LLM 스트리밍 실패: {e}")
+            yield {
+                "type": "error",
+                "content": str(e)
+            }
             stream = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,

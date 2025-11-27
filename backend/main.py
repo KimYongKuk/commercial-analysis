@@ -31,9 +31,15 @@ client = OpenAI(
 # RAG 시스템 초기화 (Lazy Loading)
 # ============================================
 # 첫 요청 시에만 초기화되어 시작 속도 개선
+import asyncio
+
+# ============================================
+# RAG 시스템 초기화 (Lazy Loading)
+# ============================================
+# 첫 요청 시에만 초기화되어 시작 속도 개선
 rag_chain = None
 
-def get_rag_chain():
+async def get_rag_chain():
     """RAG 체인 인스턴스 반환 (Lazy Loading)"""
     global rag_chain
     if rag_chain is None:
@@ -44,6 +50,16 @@ def get_rag_chain():
             temperature=0.7,
             max_tokens=1000
         )
+        
+        # Tool discovery 실행 (비동기적으로)
+        if rag_chain.enable_mcp and rag_chain.universal_client:
+            print("[RAG] MCP 도구 목록 발견 중...")
+            try:
+                tools = await rag_chain.universal_client.discover_all_tools()
+                print(f"[OK] {len(tools)}개 MCP 도구 발견 완료")
+            except Exception as e:
+                print(f"[ERROR] MCP 도구 발견 실패: {e}")
+                
         print("[OK] RAG system ready!")
     return rag_chain
 
@@ -291,7 +307,7 @@ async def rag_chat(request: ChatRequest):
         print("="*50 + "\n")
 
         # RAG 체인 가져오기 (Lazy Loading)
-        rag = get_rag_chain()
+        rag = await get_rag_chain()
 
         # RAG 파이프라인 실행
         result = await rag.run(
@@ -340,7 +356,7 @@ async def stream_rag_response(
 
     try:
         # RAG 체인 가져오기
-        rag = get_rag_chain()
+        rag = await get_rag_chain()
 
         # 스트리밍 실행 (async for 사용)
         async for chunk in rag.stream_run(
