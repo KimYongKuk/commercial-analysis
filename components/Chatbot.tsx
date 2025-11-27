@@ -55,7 +55,7 @@ type Message = {
   sources?: Source[];     // RAG 참고 문서
 };
 
-export default function Chatbot({ isOpen, onToggle, formData, locations, title, welcomeMessage, isExpanded: externalExpanded, onExpandToggle }: ChatbotProps) {
+export default function Chatbot({ isOpen, onToggle, title, welcomeMessage, isExpanded: externalExpanded, onExpandToggle }: ChatbotProps) {
   const [internalExpanded, setInternalExpanded] = useState(false);
   const isExpanded = externalExpanded !== undefined ? externalExpanded : internalExpanded;
 
@@ -76,6 +76,7 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
     },
   ]);
   const [inputValue, setInputValue] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
 
   // 스크롤 관련 상태 및 ref
   const [isAutoScroll, setIsAutoScroll] = useState(true);
@@ -241,6 +242,7 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
     setMessages([...messages, userMessage]);
     const currentInput = inputValue;
     setInputValue('');
+    setIsLoading(true);
 
     // 최근 10개 대화만 선택 (첫 번째 환영 메시지 제외)
     const MAX_HISTORY = 10;
@@ -314,6 +316,7 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
                   console.log('📥 [Chatbot] 참고 문서:', currentSources.length, '개');
                 } else if (data.event === 'answer') {
                   // 답변 청크 추가 (참고 문서는 아직 표시 안 함)
+                  setIsLoading(false); // 첫 텍스트 도착 시 로딩 해제
                   currentContent += data.content;
                   setMessages((prev: Message[]) =>
                     prev.map((msg: Message) =>
@@ -363,6 +366,8 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
       };
       setMessages((prev) => [...prev, errorMessage]);
       console.error('챗봇 API 호출 오류:', error);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -563,11 +568,10 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
                     className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'}`}
                   >
                     <div
-                      className={`max-w-[80%] rounded-lg p-3 ${
-                        message.sender === 'user'
-                          ? 'bg-blue-600 text-white'
-                          : 'bg-white text-gray-900 shadow-sm'
-                      }`}
+                      className={`max-w-[80%] rounded-lg p-3 ${message.sender === 'user'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-white text-gray-900 shadow-sm'
+                        }`}
                     >
                       <p className="text-sm whitespace-pre-wrap">{message.text}</p>
 
@@ -599,6 +603,23 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
                     </div>
                   </motion.div>
                 ))}
+
+                {/* Typing Indicator */}
+                {isLoading && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className="flex justify-start"
+                  >
+                    <div className="bg-white text-gray-900 shadow-sm rounded-lg p-4">
+                      <div className="flex space-x-1">
+                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.3s]"></div>
+                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce [animation-delay:-0.15s]"></div>
+                        <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce"></div>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
 
                 {/* 스크롤 타겟용 더미 요소 */}
                 <div ref={messagesEndRef} />
@@ -636,7 +657,7 @@ export default function Chatbot({ isOpen, onToggle, formData, locations, title, 
                   />
                   <Button
                     onClick={handleSend}
-                    disabled={!inputValue.trim()}
+                    disabled={!inputValue.trim() || isLoading}
                     className="bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white"
                   >
                     <Send className="w-4 h-4" />

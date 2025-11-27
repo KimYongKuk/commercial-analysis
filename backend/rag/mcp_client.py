@@ -32,8 +32,10 @@ class TavilyMCPClient:
     async def search(
         self,
         query: str,
-        search_depth: str = "basic",
-        max_results: int = 5
+        search_depth: str = "advanced",
+        max_results: int = 10,
+        topic: str = "general",
+        days: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Tavily 웹 검색 실행
@@ -42,6 +44,8 @@ class TavilyMCPClient:
             query: 검색 쿼리
             search_depth: 검색 깊이 ("basic" or "advanced")
             max_results: 최대 결과 개수
+            topic: 검색 주제 ("general" or "news")
+            days: 최근 N일 이내 결과 (None이면 전체 기간)
 
         Returns:
             검색 결과 딕셔너리
@@ -51,7 +55,8 @@ class TavilyMCPClient:
                         "title": "...",
                         "url": "...",
                         "content": "...",
-                        "score": 0.95
+                        "score": 0.95,
+                        "published_date": "..."
                     },
                     ...
                 ],
@@ -61,17 +66,26 @@ class TavilyMCPClient:
         print(f"\n[MCP] Tavily 웹 검색 시작: {query}")
         print(f"   - 검색 깊이: {search_depth}")
         print(f"   - 최대 결과: {max_results}")
+        print(f"   - 검색 주제: {topic}")
+        if days:
+            print(f"   - 기간: 최근 {days}일")
 
         try:
             async with self.client:
                 # tavily-search 도구 호출
+                search_params = {
+                    "query": query,
+                    "search_depth": search_depth,
+                    "max_results": max_results,
+                    "topic": topic
+                }
+                
+                if days:
+                    search_params["days"] = days
+                
                 result = await self.client.call_tool(
                     "tavily_search",
-                    {
-                        "query": query,
-                        "search_depth": search_depth,
-                        "max_results": max_results
-                    }
+                    search_params
                 )
 
                 result_data = result.data

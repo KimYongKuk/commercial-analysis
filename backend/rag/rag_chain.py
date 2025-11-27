@@ -183,6 +183,55 @@ class RAGChain:
 
         return messages
 
+    def _build_search_query_with_history(
+        self,
+        current_query: str,
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+        max_history: int = 5
+    ) -> str:
+        """
+        이전 사용자 질문들을 현재 질문에 연결하여 검색 쿼리 생성
+        
+        Args:
+            current_query: 현재 질문
+            conversation_history: 대화 기록 (user + assistant)
+            max_history: 포함할 최대 이전 질문 개수 (기본 2개)
+        
+        Returns:
+            확장된 검색 쿼리 (이전 user 질문들 + 현재 질문)
+        
+        Example:
+            conversation_history = [
+                {"role": "user", "content": "강남역 맛집"},
+                {"role": "assistant", "content": "..."},
+                {"role": "user", "content": "그 근처 아파트"}
+            ]
+            current_query = "가격대는?"
+            
+            → 결과: "강남역 맛집 그 근처 아파트 가격대는?"
+        """
+        if not conversation_history:
+            return current_query
+        
+        # 사용자 질문만 추출 (role="user")
+        # assistant 답변은 제외 (검색 효율성 및 임베딩 품질 향상)
+        user_queries = [
+            msg["content"] 
+            for msg in conversation_history 
+            if msg.get("role") == "user"
+        ][-max_history:]  # 최근 N개만 선택
+        
+        if not user_queries:
+            return current_query
+        
+        # 이전 질문들 + 현재 질문 연결
+        combined_query = " ".join(user_queries + [current_query])
+        
+        print(f"[SEARCH QUERY] 원본: {current_query}")
+        print(f"[SEARCH QUERY] 확장: {combined_query}")
+        
+        return combined_query
+
     def _is_realtime_query(self, query: str) -> bool:
         """
         실시간 정보가 필요한 질문인지 판단
@@ -204,8 +253,10 @@ class RAGChain:
     async def _tavily_search(
         self,
         query: str,
-        search_depth: str = "basic",
-        max_results: int = 3
+        search_depth: str = "advanced",
+        max_results: int = 5,
+        topic: str = "general",
+        days: Optional[int] = None
     ) -> Optional[Dict[str, Any]]:
         """
         Tavily 웹 검색 실행
@@ -214,6 +265,8 @@ class RAGChain:
             query: 검색 쿼리
             search_depth: 검색 깊이
             max_results: 최대 결과 수
+            topic: 검색 주제
+            days: 검색 기간 (일)
 
         Returns:
             검색 결과 또는 None
@@ -225,7 +278,9 @@ class RAGChain:
             result = await self.tavily_mcp.search(
                 query=query,
                 search_depth=search_depth,
-                max_results=max_results
+                max_results=max_results,
+                topic=topic,
+                days=days
             )
             return result
         except Exception as e:
@@ -473,9 +528,16 @@ class RAGChain:
         """
         print(f"\n[SEARCH] RAG 파이프라인 시작: {query}")
 
-        # 1. 로컬 문서 검색
+        # 0. 검색용 쿼리 생성 (이전 질문 포함)
+        search_query = self._build_search_query_with_history(
+            query, 
+            conversation_history,
+            max_history=2  # 최근 2개 질문만 포함
+        )
+
+        # 1. 로컬 문서 검색 (확장된 쿼리 사용)
         print(f"[DOCS] 1단계: 로컬 문서 검색 (Top-{top_k})...")
-        local_docs = self.retriever.search(query, top_k=top_k)
+        local_docs = self.retriever.search(search_query, top_k=top_k)
         print(f"   ✓ {len(local_docs)}개 문서 검색 완료")
 
         # 2. 실시간 정보 필요 여부 판단
@@ -491,7 +553,7 @@ class RAGChain:
         elif needs_realtime:
             # Case D: 실시간 필요 → 하이브리드 또는 웹만
             print(f"[STRATEGY] Case D: 실시간 정보 필요 → 웹 검색 실행")
-            web_results = await self._tavily_search(query, search_depth="basic")
+            web_results = await self._tavily_search(search_query, search_depth="advanced", max_results=5)
 
             if web_results:
                 if local_docs:
@@ -515,7 +577,7 @@ class RAGChain:
         else:
             # Case C: 로컬 없음 + 실시간 불필요 → Tavily 폴백
             print(f"[STRATEGY] Case C: 로컬 문서 없음 → Tavily 폴백")
-            web_results = await self._tavily_search(query, search_depth="basic")
+            web_results = await self._tavily_search(search_query, search_depth="advanced", max_results=5)
 
             if web_results:
                 return self._generate_from_web(web_results, query, conversation_history)
@@ -546,9 +608,16 @@ class RAGChain:
         """
         print(f"\n[SEARCH] RAG 파이프라인 시작 (스트리밍): {query}")
 
-        # 1. 로컬 문서 검색
+        # 0. 검색용 쿼리 생성 (이전 질문 포함)
+        search_query = self._build_search_query_with_history(
+            query, 
+            conversation_history,
+            max_history=2  # 최근 2개 질문만 포함
+        )
+
+        # 1. 로컬 문서 검색 (확장된 쿼리 사용)
         print(f"[DOCS] 1단계: 로컬 문서 검색 (Top-{top_k})...")
-        local_docs = self.retriever.search(query, top_k=top_k)
+        local_docs = self.retriever.search(search_query, top_k=top_k)
         print(f"   ✓ {len(local_docs)}개 문서 검색 완료")
 
         # 2. 실시간 정보 필요 여부 판단
@@ -566,7 +635,7 @@ class RAGChain:
         elif needs_realtime:
             # Case D: 실시간 필요 → 웹 검색
             print(f"[STRATEGY] Case D: 실시간 정보 필요 → 웹 검색 실행")
-            web_results = await self._tavily_search(query, search_depth="advanced")
+            web_results = await self._tavily_search(search_query, search_depth="advanced", max_results=5)
 
             if web_results:
                 if local_docs:
@@ -597,7 +666,7 @@ class RAGChain:
         else:
             # Case C: 로컬 없음 → Tavily 폴백
             print(f"[STRATEGY] Case C: 로컬 문서 없음 → Tavily 폴백")
-            web_results = await self._tavily_search(query, search_depth="basic")
+            web_results = await self._tavily_search(search_query, search_depth="advanced", max_results=5)
 
             if web_results:
                 yield {"type": "web_results", "content": web_results}
