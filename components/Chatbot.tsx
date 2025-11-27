@@ -76,7 +76,6 @@ export default function Chatbot({ isOpen, onToggle, title, welcomeMessage, isExp
     },
   ]);
   const [inputValue, setInputValue] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
 
   // 스크롤 관련 상태 및 ref
   const [isAutoScroll, setIsAutoScroll] = useState(true);
@@ -242,7 +241,6 @@ export default function Chatbot({ isOpen, onToggle, title, welcomeMessage, isExp
     setMessages([...messages, userMessage]);
     const currentInput = inputValue;
     setInputValue('');
-    setIsLoading(true);
 
     // 최근 10개 대화만 선택 (첫 번째 환영 메시지 제외)
     const MAX_HISTORY = 10;
@@ -315,9 +313,12 @@ export default function Chatbot({ isOpen, onToggle, title, welcomeMessage, isExp
                   currentSources = data.sources || [];
                   console.log('📥 [Chatbot] 참고 문서:', currentSources.length, '개');
                 } else if (data.event === 'answer') {
-                  // 답변 청크 추가 (참고 문서는 아직 표시 안 함)
-                  setIsLoading(false); // 첫 텍스트 도착 시 로딩 해제
+                  // 답변 청크 추가
+                  console.log('📝 [Chatbot] Answer chunk received:', data.content);
                   currentContent += data.content;
+                  console.log('📝 [Chatbot] Current content length:', currentContent.length);
+
+                  // 즉시 UI 업데이트 (디바운싱 제거)
                   setMessages((prev: Message[]) =>
                     prev.map((msg: Message) =>
                       msg.id === aiMessageId
@@ -352,7 +353,7 @@ export default function Chatbot({ isOpen, onToggle, title, welcomeMessage, isExp
       setMessages((prev: Message[]) =>
         prev.map((msg: Message) =>
           msg.id === aiMessageId
-            ? { ...msg, isStreaming: false, sources: currentSources }
+            ? { ...msg, text: currentContent, isStreaming: false, sources: currentSources }
             : msg
         )
       );
@@ -366,8 +367,6 @@ export default function Chatbot({ isOpen, onToggle, title, welcomeMessage, isExp
       };
       setMessages((prev) => [...prev, errorMessage]);
       console.error('챗봇 API 호출 오류:', error);
-    } finally {
-      setIsLoading(false);
     }
   };
 
@@ -605,7 +604,7 @@ export default function Chatbot({ isOpen, onToggle, title, welcomeMessage, isExp
                 ))}
 
                 {/* Typing Indicator */}
-                {isLoading && (
+                {/* {isLoading && (
                   <motion.div
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -619,7 +618,7 @@ export default function Chatbot({ isOpen, onToggle, title, welcomeMessage, isExp
                       </div>
                     </div>
                   </motion.div>
-                )}
+                )} */}
 
                 {/* 스크롤 타겟용 더미 요소 */}
                 <div ref={messagesEndRef} />
@@ -657,7 +656,7 @@ export default function Chatbot({ isOpen, onToggle, title, welcomeMessage, isExp
                   />
                   <Button
                     onClick={handleSend}
-                    disabled={!inputValue.trim() || isLoading}
+                    disabled={!inputValue.trim()}
                     className="bg-gradient-to-r from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700 text-white"
                   >
                     <Send className="w-4 h-4" />

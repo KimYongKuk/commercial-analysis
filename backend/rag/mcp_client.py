@@ -123,6 +123,34 @@ class TavilyMCPClient:
             print(f"[ERROR] Tavily 추출 실패: {e}")
             raise
 
+    async def call_tool_dynamic(
+        self,
+        tool_name: str,
+        tool_args: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        동적으로 MCP 도구 호출 (Tool Calling용)
+
+        Args:
+            tool_name: 도구 이름 (예: "tavily_search", "tavily_extract")
+            tool_args: 도구 파라미터
+
+        Returns:
+            도구 실행 결과
+        """
+        print(f"\n[MCP] 동적 도구 호출: {tool_name}")
+        print(f"   - 파라미터: {tool_args}")
+
+        try:
+            async with self.client:
+                result = await self.client.call_tool(tool_name, tool_args)
+                result_data = result.data
+                print(f"[OK] {tool_name} 실행 완료")
+                return result_data
+        except Exception as e:
+            print(f"[ERROR] {tool_name} 실행 실패: {e}")
+            raise
+
     async def list_available_tools(self) -> List[Dict[str, Any]]:
         """
         사용 가능한 MCP 도구 목록 확인

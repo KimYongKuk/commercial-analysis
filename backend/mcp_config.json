@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "tavily": {
+      "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_API_KEY}"
+    },
+    "brave": {
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@smithery/cli@latest", "run", "brave",
+               "--key", "bb935426-668e-4721-8468-737bb538b799",
+               "--profile", "molecular-anteater-cPxy9A"]
+    }
+  }
+}

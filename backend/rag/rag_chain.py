@@ -10,7 +10,7 @@ import os
 from .retriever import Retriever
 from .embeddings import BGEEmbeddings
 from .vector_store import ChromaVectorStore
-from .mcp_client import TavilyMCPClient
+from .mcp_client_new import UniversalMCPClient, MCPToolRouter
 
 
 class RAGChain:
@@ -64,8 +64,8 @@ class RAGChain:
         model_name: str = "gpt-4o-mini",
         temperature: float = 0.7,
         max_tokens: int = 1000,
-        tavily_api_key: str = None,
-        enable_web_search: bool = True
+        mcp_config_path: str = "mcp_config.json",
+        enable_mcp: bool = True
     ):
         """
         RAG 파이프라인 초기화
@@ -76,8 +76,8 @@ class RAGChain:
             model_name: OpenAI 모델 이름
             temperature: 생성 온도 (0~2)
             max_tokens: 최대 토큰 수
-            tavily_api_key: Tavily API 키 (웹 검색용)
-            enable_web_search: 웹 검색 활성화 여부
+            mcp_config_path: MCP 설정 파일 경로 (JSON)
+            enable_mcp: MCP 도구 활성화 여부
         """
         # OpenAI API 키 설정
         if openai_api_key is None:
@@ -92,30 +92,37 @@ class RAGChain:
 
         # 검색기 초기화
         if retriever is None:
-            print("🔧 기본 Retriever 초기화 중...")
+            print("[RAG] 기본 Retriever 초기화 중...")
             self.retriever = Retriever()
         else:
             self.retriever = retriever
 
-        # Tavily MCP 클라이언트 초기화
-        self.tavily_mcp = None
-        self.enable_web_search = enable_web_search
+        # MCP Tool Router 초기화
+        self.mcp_tool_router = None
+        self.enable_mcp = enable_mcp
 
-        if enable_web_search:
-            if tavily_api_key is None:
-                tavily_api_key = os.getenv("TAVILY_API_KEY")
+        if enable_mcp:
+            try:
+                print(f"[RAG] MCP Tool Router 초기화 중... (설정: {mcp_config_path})")
 
-            if tavily_api_key:
-                try:
-                    self.tavily_mcp = TavilyMCPClient(tavily_api_key)
-                    print("🌐 Tavily 웹 검색 활성화")
-                except Exception as e:
-                    print(f"⚠️  Tavily 초기화 실패: {e}")
-                    print("   → 웹 검색 기능 비활성화")
-                    self.enable_web_search = False
-            else:
-                print("⚠️  TAVILY_API_KEY 없음 → 웹 검색 비활성화")
-                self.enable_web_search = False
+                # UniversalMCPClient 초기화 (JSON 설정)
+                self.universal_client = UniversalMCPClient.from_config(mcp_config_path)
+
+                # MCPToolRouter 초기화
+                self.mcp_tool_router = MCPToolRouter(
+                    openai_api_key=openai_api_key,
+                    universal_client=self.universal_client,
+                    model_name="gpt-4o-mini",  # Tool selection용 경량 모델
+                    temperature=0.3  # 도구 선택은 낮은 temperature
+                )
+
+                print("[OK] MCP Tool Router 활성화 완료")
+            except Exception as e:
+                print(f"[ERROR] MCP Tool Router 초기화 실패: {e}")
+                print("   -> MCP 기능 비활성화")
+                self.enable_mcp = False
+                self.mcp_tool_router = None
+                self.universal_client = None
 
         print(f"[OK] RAG 파이프라인 준비 완료 (모델: {model_name})")
 
@@ -232,60 +239,49 @@ class RAGChain:
         
         return combined_query
 
-    def _is_realtime_query(self, query: str) -> bool:
+    async def _execute_mcp_tools(
+        self,
+        query: str,
+        local_docs: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
         """
-        실시간 정보가 필요한 질문인지 판단
+        MCP Tool Router를 사용하여 필요한 도구 실행
 
         Args:
             query: 사용자 질문
+            local_docs: 로컬 검색 결과
 
         Returns:
-            실시간 정보 필요 여부
+            MCP 실행 결과
+            {
+                'mcp_used': bool,
+                'tools_used': List[str],
+                'results': Dict[str, Any],
+                'direct_answer': Optional[str]
+            }
         """
-        realtime_keywords = [
-            "최신", "현재", "지금", "요즘", "트렌드",
-            "2025", "2024", "올해", "이번 달", "최근",
-            "오늘", "어제", "내일"
-        ]
-        query_lower = query.lower()
-        return any(keyword in query_lower for keyword in realtime_keywords)
-
-    async def _tavily_search(
-        self,
-        query: str,
-        search_depth: str = "advanced",
-        max_results: int = 5,
-        topic: str = "general",
-        days: Optional[int] = None
-    ) -> Optional[Dict[str, Any]]:
-        """
-        Tavily 웹 검색 실행
-
-        Args:
-            query: 검색 쿼리
-            search_depth: 검색 깊이
-            max_results: 최대 결과 수
-            topic: 검색 주제
-            days: 검색 기간 (일)
-
-        Returns:
-            검색 결과 또는 None
-        """
-        if not self.enable_web_search or not self.tavily_mcp:
-            return None
+        if not self.enable_mcp or not self.mcp_tool_router:
+            return {
+                'mcp_used': False,
+                'tools_used': [],
+                'results': {},
+                'direct_answer': None
+            }
 
         try:
-            result = await self.tavily_mcp.search(
+            result = await self.mcp_tool_router.select_and_execute_mcp_tools(
                 query=query,
-                search_depth=search_depth,
-                max_results=max_results,
-                topic=topic,
-                days=days
+                local_docs=local_docs
             )
             return result
         except Exception as e:
-            print(f"[ERROR] Tavily 검색 실패: {e}")
-            return None
+            print(f"[ERROR] MCP Tool Router 실행 실패: {e}")
+            return {
+                'mcp_used': False,
+                'tools_used': [],
+                'results': {},
+                'direct_answer': None
+            }
 
     def _generate_from_docs(
         self,
@@ -341,39 +337,76 @@ class RAGChain:
                 "query": query
             }
 
-    def _generate_from_web(
+    def _format_mcp_results_for_prompt(
         self,
-        web_results: Dict[str, Any],
+        mcp_results: Dict[str, Any],
+        max_results_per_tool: int = 3
+    ) -> str:
+        """
+        MCP 도구 실행 결과를 프롬프트용 텍스트로 포맷팅
+
+        Args:
+            mcp_results: MCP 도구 실행 결과 딕셔너리
+            max_results_per_tool: 각 도구당 최대 결과 개수
+
+        Returns:
+            포맷팅된 텍스트
+        """
+        if not mcp_results:
+            return "MCP 검색 결과를 찾을 수 없습니다."
+
+        formatted_parts = []
+
+        for tool_name, tool_result in mcp_results.items():
+            formatted_parts.append(f"[{tool_name} 결과]")
+
+            # Tavily/Brave 검색 결과 형식 처리
+            if isinstance(tool_result, dict) and 'results' in tool_result:
+                results = tool_result.get('results', [])[:max_results_per_tool]
+                for i, item in enumerate(results, 1):
+                    text = f"\n{i}. 제목: {item.get('title', 'N/A')}\n"
+                    text += f"   URL: {item.get('url', 'N/A')}\n"
+                    text += f"   내용: {item.get('content', 'N/A')}"
+                    formatted_parts.append(text)
+            else:
+                # 기타 결과 형식
+                formatted_parts.append(str(tool_result)[:500])
+
+        return "\n\n---\n\n".join(formatted_parts)
+
+    def _generate_from_mcp(
+        self,
+        mcp_results: Dict[str, Any],
         query: str,
         conversation_history: Optional[List[Dict[str, str]]] = None
     ) -> Dict[str, Any]:
         """
-        웹 검색 결과만 사용하여 답변 생성
+        MCP 도구 결과만 사용하여 답변 생성
 
         Args:
-            web_results: Tavily 검색 결과
+            mcp_results: MCP 도구 실행 결과
             query: 사용자 질문
             conversation_history: 대화 기록
 
         Returns:
             답변 결과
         """
-        print("[GENERATE] 전략: 웹 검색 결과만 사용 (Tavily)")
+        print("[GENERATE] 전략: MCP 도구 결과만 사용")
 
-        # 웹 검색 결과를 컨텍스트로 변환
-        web_context = self.tavily_mcp.format_search_results_for_prompt(web_results, max_results=3)
+        # MCP 결과를 컨텍스트로 변환
+        mcp_context = self._format_mcp_results_for_prompt(mcp_results, max_results_per_tool=3)
 
         # 시스템 프롬프트 (템플릿 사용)
         system_prompt = self._get_system_prompt("web")
 
         # 사용자 프롬프트
-        user_prompt = f"""[웹 검색 결과]
-{web_context}
+        user_prompt = f"""[MCP 도구 검색 결과]
+{mcp_context}
 
 [사용자 질문]
 {query}
 
-위 웹 검색 결과를 바탕으로 사용자의 질문에 답변해주세요.
+위 검색 결과를 바탕으로 사용자의 질문에 답변해주세요.
 """
 
         # 메시지 구성
@@ -398,8 +431,8 @@ class RAGChain:
             return {
                 "answer": answer,
                 "sources": [],
-                "web_results": web_results,
-                "web_search_used": True,
+                "mcp_results": mcp_results,
+                "web_search_used": True,  # 호환성 유지
                 "query": query,
                 "usage": {
                     "prompt_tokens": response.usage.prompt_tokens,
@@ -413,7 +446,7 @@ class RAGChain:
             return {
                 "answer": f"죄송합니다. 답변 생성 중 오류가 발생했습니다: {str(e)}",
                 "sources": [],
-                "web_results": web_results,
+                "mcp_results": mcp_results,
                 "web_search_used": True,
                 "query": query
             }
@@ -421,29 +454,29 @@ class RAGChain:
     def _generate_hybrid(
         self,
         local_docs: List[Dict[str, Any]],
-        web_results: Dict[str, Any],
+        mcp_results: Dict[str, Any],
         query: str,
         conversation_history: Optional[List[Dict[str, str]]] = None
     ) -> Dict[str, Any]:
         """
-        로컬 문서 + 웹 검색 결과 결합하여 답변 생성
+        로컬 문서 + MCP 도구 결과 결합하여 답변 생성
 
         Args:
             local_docs: 로컬 검색 결과
-            web_results: 웹 검색 결과
+            mcp_results: MCP 도구 실행 결과
             query: 사용자 질문
             conversation_history: 대화 기록
 
         Returns:
             답변 결과
         """
-        print("[GENERATE] 전략: 하이브리드 (로컬 + 웹)")
+        print("[GENERATE] 전략: 하이브리드 (로컬 + MCP)")
 
         # 로컬 문서 컨텍스트
         local_context = self.retriever.format_documents_for_prompt(local_docs)
 
-        # 웹 검색 컨텍스트
-        web_context = self.tavily_mcp.format_search_results_for_prompt(web_results, max_results=2)
+        # MCP 결과 컨텍스트
+        mcp_context = self._format_mcp_results_for_prompt(mcp_results, max_results_per_tool=2)
 
         # 시스템 프롬프트 (템플릿 사용)
         system_prompt = self._get_system_prompt("hybrid")
@@ -452,13 +485,13 @@ class RAGChain:
         user_prompt = f"""[내부 참고 문서]
 {local_context}
 
-[최신 웹 검색 결과]
-{web_context}
+[최신 MCP 검색 결과]
+{mcp_context}
 
 [사용자 질문]
 {query}
 
-위의 내부 참고 문서와 최신 웹 검색 결과를 종합하여 사용자의 질문에 답변해주세요.
+위의 내부 참고 문서와 최신 검색 결과를 종합하여 사용자의 질문에 답변해주세요.
 """
 
         # 메시지 구성
@@ -483,8 +516,8 @@ class RAGChain:
             return {
                 "answer": answer,
                 "sources": local_docs,
-                "web_results": web_results,
-                "web_search_used": True,
+                "mcp_results": mcp_results,
+                "web_search_used": True,  # 호환성 유지
                 "query": query,
                 "usage": {
                     "prompt_tokens": response.usage.prompt_tokens,
@@ -498,7 +531,7 @@ class RAGChain:
             return {
                 "answer": f"죄송합니다. 답변 생성 중 오류가 발생했습니다: {str(e)}",
                 "sources": local_docs,
-                "web_results": web_results,
+                "mcp_results": mcp_results,
                 "web_search_used": True,
                 "query": query
             }
@@ -510,7 +543,7 @@ class RAGChain:
         top_k: int = 3
     ) -> Dict[str, Any]:
         """
-        RAG 파이프라인 실행 (Tavily 웹 검색 통합)
+        RAG 파이프라인 실행 (MCP Tool Router 통합)
 
         Args:
             query: 사용자 질문
@@ -520,9 +553,10 @@ class RAGChain:
         Returns:
             {
                 "answer": "LLM 답변",
-                "sources": [{...}, {...}],  # 참고 문서
-                "web_results": {...},       # 웹 검색 결과 (있으면)
-                "web_search_used": bool,    # 웹 검색 사용 여부
+                "sources": [{...}, {...}],     # 참고 문서
+                "mcp_results": {...},          # MCP 도구 결과 (있으면)
+                "tools_used": [...],           # 사용된 도구 목록
+                "web_search_used": bool,       # 호환성 유지
                 "query": "원본 질문"
             }
         """
@@ -530,64 +564,69 @@ class RAGChain:
 
         # 0. 검색용 쿼리 생성 (이전 질문 포함)
         search_query = self._build_search_query_with_history(
-            query, 
+            query,
             conversation_history,
             max_history=2  # 최근 2개 질문만 포함
         )
 
-        # 1. 로컬 문서 검색 (확장된 쿼리 사용)
+        # 1. 로컬 문서 검색 (항상 실행)
         print(f"[DOCS] 1단계: 로컬 문서 검색 (Top-{top_k})...")
         local_docs = self.retriever.search(search_query, top_k=top_k)
-        print(f"   ✓ {len(local_docs)}개 문서 검색 완료")
+        print(f"   [OK] {len(local_docs)}개 문서 검색 완료")
 
-        # 2. 실시간 정보 필요 여부 판단
-        needs_realtime = self._is_realtime_query(query)
-        print(f"[CHECK] 실시간 정보 필요: {'✅ 예' if needs_realtime else '❌ 아니오'}")
+        # 2. MCP Tool Router 실행 (LLM이 판단)
+        print(f"[MCP] 2단계: LLM 기반 도구 선택 및 실행...")
+        mcp_result = await self._execute_mcp_tools(query, local_docs)
+
+        if mcp_result['mcp_used']:
+            print(f"   [OK] LLM 판단: MCP 도구 사용")
+            print(f"   [OK] 사용된 도구: {mcp_result['tools_used']}")
+        else:
+            print(f"   [OK] LLM 판단: 로컬 문서로 충분")
 
         # 3. 전략 선택 및 실행
-        if local_docs and not needs_realtime:
-            # Case A: 로컬 문서 충분 + 실시간 불필요 → 로컬만 사용
-            print(f"[STRATEGY] Case A: 로컬 문서만 사용")
-            return self._generate_from_docs(local_docs, query, conversation_history)
-
-        elif needs_realtime:
-            # Case D: 실시간 필요 → 하이브리드 또는 웹만
-            print(f"[STRATEGY] Case D: 실시간 정보 필요 → 웹 검색 실행")
-            web_results = await self._tavily_search(search_query, search_depth="advanced", max_results=5)
-
-            if web_results:
-                if local_docs:
-                    # 로컬 + 웹 하이브리드
-                    return self._generate_hybrid(local_docs, web_results, query, conversation_history)
-                else:
-                    # 웹만
-                    return self._generate_from_web(web_results, query, conversation_history)
+        if mcp_result['mcp_used'] and mcp_result['results']:
+            # Case A: MCP 도구 사용됨
+            if local_docs:
+                # 로컬 + MCP 하이브리드
+                print(f"[STRATEGY] 하이브리드 (로컬 + MCP)")
+                result = self._generate_hybrid(
+                    local_docs,
+                    mcp_result['results'],
+                    query,
+                    conversation_history
+                )
             else:
-                # 웹 검색 실패 → 로컬만 사용 (있으면)
-                if local_docs:
-                    return self._generate_from_docs(local_docs, query, conversation_history)
-                else:
-                    return {
-                        "answer": "죄송합니다. 관련된 정보를 찾을 수 없습니다.",
-                        "sources": [],
-                        "web_search_used": False,
-                        "query": query
-                    }
+                # MCP만
+                print(f"[STRATEGY] MCP 도구 결과만 사용")
+                result = self._generate_from_mcp(
+                    mcp_result['results'],
+                    query,
+                    conversation_history
+                )
+
+            # 도구 목록 추가
+            result['tools_used'] = mcp_result['tools_used']
+            return result
+
+        elif local_docs:
+            # Case B: 로컬 문서만 사용
+            print(f"[STRATEGY] 로컬 문서만 사용")
+            result = self._generate_from_docs(local_docs, query, conversation_history)
+            result['tools_used'] = []
+            return result
 
         else:
-            # Case C: 로컬 없음 + 실시간 불필요 → Tavily 폴백
-            print(f"[STRATEGY] Case C: 로컬 문서 없음 → Tavily 폴백")
-            web_results = await self._tavily_search(search_query, search_depth="advanced", max_results=5)
-
-            if web_results:
-                return self._generate_from_web(web_results, query, conversation_history)
-            else:
-                return {
-                    "answer": "죄송합니다. 관련된 정보를 찾을 수 없습니다.",
-                    "sources": [],
-                    "web_search_used": False,
-                    "query": query
-                }
+            # Case C: 정보 없음
+            print(f"[STRATEGY] 정보 없음")
+            return {
+                "answer": "죄송합니다. 관련된 정보를 찾을 수 없습니다.",
+                "sources": [],
+                "mcp_results": {},
+                "tools_used": [],
+                "web_search_used": False,
+                "query": query
+            }
 
     async def stream_run(
         self,
@@ -596,7 +635,7 @@ class RAGChain:
         top_k: int = 3
     ):
         """
-        RAG 파이프라인 스트리밍 실행 (Tavily 웹 검색 통합)
+        RAG 파이프라인 스트리밍 실행 (MCP Tool Router 통합)
 
         Args:
             query: 사용자 질문
@@ -610,73 +649,60 @@ class RAGChain:
 
         # 0. 검색용 쿼리 생성 (이전 질문 포함)
         search_query = self._build_search_query_with_history(
-            query, 
+            query,
             conversation_history,
             max_history=2  # 최근 2개 질문만 포함
         )
 
-        # 1. 로컬 문서 검색 (확장된 쿼리 사용)
+        # 1. 로컬 문서 검색 (항상 실행)
         print(f"[DOCS] 1단계: 로컬 문서 검색 (Top-{top_k})...")
         local_docs = self.retriever.search(search_query, top_k=top_k)
-        print(f"   ✓ {len(local_docs)}개 문서 검색 완료")
+        print(f"   [OK] {len(local_docs)}개 문서 검색 완료")
 
-        # 2. 실시간 정보 필요 여부 판단
-        needs_realtime = self._is_realtime_query(query)
-        print(f"[CHECK] 실시간 정보 필요: {'✅ 예' if needs_realtime else '❌ 아니오'}")
+        # 2. MCP Tool Router 실행 (LLM이 판단)
+        print(f"[MCP] 2단계: LLM 기반 도구 선택 및 실행...")
+        mcp_result = await self._execute_mcp_tools(query, local_docs)
+
+        if mcp_result['mcp_used']:
+            print(f"   [OK] LLM 판단: MCP 도구 사용")
+            print(f"   [OK] 사용된 도구: {mcp_result['tools_used']}")
+        else:
+            print(f"   [OK] LLM 판단: 로컬 문서로 충분")
 
         # 3. 전략 선택 및 실행
-        if local_docs and not needs_realtime:
-            # Case A: 로컬 문서만 사용
-            print(f"[STRATEGY] Case A: 로컬 문서만 사용 (스트리밍)")
+        if mcp_result['mcp_used'] and mcp_result['results']:
+            # Case A: MCP 도구 사용됨
+            if local_docs:
+                # 하이브리드
+                print(f"[STREAM] 하이브리드 스트리밍 시작")
+                yield {"type": "sources", "content": local_docs}
+                yield {"type": "mcp_results", "content": mcp_result['results']}
+                yield {"type": "tools_used", "content": mcp_result['tools_used']}
+                async for chunk in self._stream_hybrid(local_docs, mcp_result['results'], query, conversation_history):
+                    yield chunk
+            else:
+                # MCP만
+                print(f"[STREAM] MCP 결과 스트리밍 시작")
+                yield {"type": "mcp_results", "content": mcp_result['results']}
+                yield {"type": "tools_used", "content": mcp_result['tools_used']}
+                async for chunk in self._stream_from_mcp(mcp_result['results'], query, conversation_history):
+                    yield chunk
+
+        elif local_docs:
+            # Case B: 로컬 문서만 사용
+            print(f"[STREAM] 로컬 문서만 사용 (스트리밍)")
             yield {"type": "sources", "content": local_docs}
+            yield {"type": "tools_used", "content": []}
             async for chunk in self._stream_from_docs(local_docs, query, conversation_history):
                 yield chunk
 
-        elif needs_realtime:
-            # Case D: 실시간 필요 → 웹 검색
-            print(f"[STRATEGY] Case D: 실시간 정보 필요 → 웹 검색 실행")
-            web_results = await self._tavily_search(search_query, search_depth="advanced", max_results=5)
-
-            if web_results:
-                if local_docs:
-                    # 하이브리드
-                    print(f"[STREAM] 하이브리드 스트리밍 시작")
-                    yield {"type": "sources", "content": local_docs}
-                    yield {"type": "web_results", "content": web_results}
-                    async for chunk in self._stream_hybrid(local_docs, web_results, query, conversation_history):
-                        yield chunk
-                else:
-                    # 웹만
-                    print(f"[STREAM] 웹 검색 결과 스트리밍 시작")
-                    yield {"type": "web_results", "content": web_results}
-                    async for chunk in self._stream_from_web(web_results, query, conversation_history):
-                        yield chunk
-            else:
-                # 웹 검색 실패 → 로컬만 (있으면)
-                if local_docs:
-                    yield {"type": "sources", "content": local_docs}
-                    async for chunk in self._stream_from_docs(local_docs, query, conversation_history):
-                        yield chunk
-                else:
-                    yield {
-                        "type": "answer",
-                        "content": "죄송합니다. 관련된 정보를 찾을 수 없습니다."
-                    }
-
         else:
-            # Case C: 로컬 없음 → Tavily 폴백
-            print(f"[STRATEGY] Case C: 로컬 문서 없음 → Tavily 폴백")
-            web_results = await self._tavily_search(search_query, search_depth="advanced", max_results=5)
-
-            if web_results:
-                yield {"type": "web_results", "content": web_results}
-                async for chunk in self._stream_from_web(web_results, query, conversation_history):
-                    yield chunk
-            else:
-                yield {
-                    "type": "answer",
-                    "content": "죄송합니다. 관련된 정보를 찾을 수 없습니다."
-                }
+            # Case C: 정보 없음
+            print(f"[STREAM] 정보 없음")
+            yield {
+                "type": "answer",
+                "content": "죄송합니다. 관련된 정보를 찾을 수 없습니다."
+            }
 
     async def _stream_from_docs(
         self,
@@ -696,11 +722,11 @@ class RAGChain:
             답변 청크
         """
         print("[STREAM] 로컬 문서 기반 스트리밍")
-        
+
         # 프롬프트 생성
         messages = self.create_prompt(query, local_docs, conversation_history)
 
-        # LLM 스트리밍 호출
+        # LLM 스트리밍 호출 (비동기)
         try:
             stream = self.client.chat.completions.create(
                 model=self.model_name,
@@ -710,12 +736,15 @@ class RAGChain:
                 stream=True
             )
 
+            # 동기 스트림을 순회하면서 바로바로 yield
             for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    yield {
-                        "type": "answer",
-                        "content": chunk.choices[0].delta.content
-                    }
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    if content:  # 빈 문자열 제외
+                        yield {
+                            "type": "answer",
+                            "content": content
+                        }
 
         except Exception as e:
             print(f"[ERROR] LLM 스트리밍 실패: {e}")
@@ -724,39 +753,39 @@ class RAGChain:
                 "content": str(e)
             }
 
-    async def _stream_from_web(
+    async def _stream_from_mcp(
         self,
-        web_results: Dict[str, Any],
+        mcp_results: Dict[str, Any],
         query: str,
         conversation_history: Optional[List[Dict[str, str]]] = None
     ):
         """
-        웹 검색 결과만 사용하여 스트리밍 답변 생성
+        MCP 도구 결과만 사용하여 스트리밍 답변 생성
 
         Args:
-            web_results: Tavily 검색 결과
+            mcp_results: MCP 도구 실행 결과
             query: 사용자 질문
             conversation_history: 대화 기록
 
         Yields:
             답변 청크
         """
-        print("[STREAM] 웹 검색 결과 기반 스트리밍")
+        print("[STREAM] MCP 결과 기반 스트리밍")
 
-        # 웹 검색 결과를 컨텍스트로 변환
-        web_context = self.tavily_mcp.format_search_results_for_prompt(web_results, max_results=3)
+        # MCP 결과를 컨텍스트로 변환
+        mcp_context = self._format_mcp_results_for_prompt(mcp_results, max_results_per_tool=3)
 
         # 시스템 프롬프트 (템플릿 사용)
         system_prompt = self._get_system_prompt("web")
 
         # 사용자 프롬프트
-        user_prompt = f"""[웹 검색 결과]
-{web_context}
+        user_prompt = f"""[MCP 도구 검색 결과]
+{mcp_context}
 
 [사용자 질문]
 {query}
 
-위 웹 검색 결과를 바탕으로 사용자의 질문에 답변해주세요.
+위 검색 결과를 바탕으로 사용자의 질문에 답변해주세요.
 """
 
         # 메시지 구성
@@ -778,11 +807,13 @@ class RAGChain:
             )
 
             for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    yield {
-                        "type": "answer",
-                        "content": chunk.choices[0].delta.content
-                    }
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        yield {
+                            "type": "answer",
+                            "content": content
+                        }
 
         except Exception as e:
             print(f"[ERROR] LLM 스트리밍 실패: {e}")
@@ -794,29 +825,29 @@ class RAGChain:
     async def _stream_hybrid(
         self,
         local_docs: List[Dict[str, Any]],
-        web_results: Dict[str, Any],
+        mcp_results: Dict[str, Any],
         query: str,
         conversation_history: Optional[List[Dict[str, str]]] = None
     ):
         """
-        로컬 문서 + 웹 검색 결과 결합하여 스트리밍 답변 생성
+        로컬 문서 + MCP 도구 결과 결합하여 스트리밍 답변 생성
 
         Args:
             local_docs: 로컬 검색 결과
-            web_results: 웹 검색 결과
+            mcp_results: MCP 도구 실행 결과
             query: 사용자 질문
             conversation_history: 대화 기록
 
         Yields:
             답변 청크
         """
-        print("[STREAM] 하이브리드 (로컬 + 웹) 스트리밍")
+        print("[STREAM] 하이브리드 (로컬 + MCP) 스트리밍")
 
         # 로컬 문서 컨텍스트
         local_context = self.retriever.format_documents_for_prompt(local_docs)
 
-        # 웹 검색 컨텍스트
-        web_context = self.tavily_mcp.format_search_results_for_prompt(web_results, max_results=2)
+        # MCP 결과 컨텍스트
+        mcp_context = self._format_mcp_results_for_prompt(mcp_results, max_results_per_tool=2)
 
         # 시스템 프롬프트 (템플릿 사용)
         system_prompt = self._get_system_prompt("hybrid")
@@ -825,13 +856,13 @@ class RAGChain:
         user_prompt = f"""[내부 참고 문서]
 {local_context}
 
-[최신 웹 검색 결과]
-{web_context}
+[최신 MCP 검색 결과]
+{mcp_context}
 
 [사용자 질문]
 {query}
 
-위의 내부 참고 문서와 최신 웹 검색 결과를 종합하여 사용자의 질문에 답변해주세요.
+위의 내부 참고 문서와 최신 검색 결과를 종합하여 사용자의 질문에 답변해주세요.
 """
 
         # 메시지 구성
@@ -853,11 +884,13 @@ class RAGChain:
             )
 
             for chunk in stream:
-                if chunk.choices[0].delta.content:
-                    yield {
-                        "type": "answer",
-                        "content": chunk.choices[0].delta.content
-                    }
+                if chunk.choices and chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        yield {
+                            "type": "answer",
+                            "content": content
+                        }
 
         except Exception as e:
             print(f"[ERROR] LLM 스트리밍 실패: {e}")

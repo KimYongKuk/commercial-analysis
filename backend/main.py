@@ -44,7 +44,7 @@ def get_rag_chain():
             temperature=0.7,
             max_tokens=1000
         )
-        print("✅ RAG 시스템 준비 완료!")
+        print("[OK] RAG system ready!")
     return rag_chain
 
 # ============================================
@@ -131,15 +131,15 @@ async def chat(request: ChatRequest):
         analysis_results = request.analysis_results
         conversation_history = request.conversation_history
 
-        # 🔍 로깅: 받은 데이터 확인
+        # Logging
         print("\n" + "="*50)
-        print("📥 [Backend] 받은 사용자 메시지:", user_message)
-        print("📥 [Backend] 대화 히스토리 개수:", len(conversation_history) if conversation_history else 0)
+        print("[Backend] Received user message:", user_message)
+        print("[Backend] History count:", len(conversation_history) if conversation_history else 0)
         if conversation_history:
-            print("📥 [Backend] 대화 히스토리:")
+            print("[Backend] History:")
             for i, msg in enumerate(conversation_history, 1):
                 role = msg.get('role', 'unknown')
-                content = msg.get('content', '')[:50]  # 처음 50자만
+                content = msg.get('content', '')[:50]
                 print(f"  {i}. [{role}] {content}...")
         print("="*50 + "\n")
 
@@ -216,9 +216,9 @@ async def chat(request: ChatRequest):
             "content": user_message
         })
 
-        # 🔍 로깅: OpenAI에 전송할 메시지 개수
-        print("📤 [Backend] OpenAI에 전송할 메시지 개수:", len(messages_list))
-        print("📤 [Backend] 메시지 구성:")
+        # Logging: Messages to OpenAI
+        print("[Backend] Sending to OpenAI, message count:", len(messages_list))
+        print("[Backend] Message structure:")
         for i, msg in enumerate(messages_list, 1):
             role = msg.get('role', 'unknown')
             content_preview = msg.get('content', '')[:50]
@@ -237,8 +237,8 @@ async def chat(request: ChatRequest):
         # AI 응답 추출
         ai_reply = response.choices[0].message.content
 
-        # 🔍 로깅: OpenAI 응답
-        print("✅ [Backend] OpenAI 응답:", ai_reply[:100] if ai_reply else "None")
+        # Logging: OpenAI response
+        print("[OK] [Backend] OpenAI response:", ai_reply[:100] if ai_reply else "None")
         print("="*50 + "\n")
 
         # 응답 반환
@@ -284,10 +284,10 @@ async def rag_chat(request: ChatRequest):
         user_message = request.message
         conversation_history = request.conversation_history
 
-        # 로깅
+        # Logging
         print("\n" + "="*50)
-        print("📥 [RAG Backend] 받은 사용자 메시지:", user_message)
-        print("📥 [RAG Backend] 대화 히스토리 개수:", len(conversation_history) if conversation_history else 0)
+        print("[RAG Backend] Received user message:", user_message)
+        print("[RAG Backend] History count:", len(conversation_history) if conversation_history else 0)
         print("="*50 + "\n")
 
         # RAG 체인 가져오기 (Lazy Loading)
@@ -300,10 +300,10 @@ async def rag_chat(request: ChatRequest):
             top_k=3  # 상위 3개 문서 검색
         )
 
-        # 로깅
-        print("✅ [RAG Backend] RAG 답변 생성 완료")
-        print(f"   - 참고 문서 수: {len(result.get('sources', []))}")
-        print(f"   - 사용 토큰: {result.get('usage', {}).get('total_tokens', 'N/A')}")
+        # Logging
+        print("[OK] [RAG Backend] RAG answer generated")
+        print(f"   - Sources: {len(result.get('sources', []))}")
+        print(f"   - Tokens: {result.get('usage', {}).get('total_tokens', 'N/A')}")
         print("="*50 + "\n")
 
         # 응답 반환
@@ -315,7 +315,7 @@ async def rag_chat(request: ChatRequest):
         )
 
     except Exception as e:
-        print(f"❌ [RAG Backend] 오류 발생: {str(e)}")
+        print(f"[ERROR] [RAG Backend] Error: {str(e)}")
         print("="*50 + "\n")
 
         raise HTTPException(
@@ -336,6 +336,8 @@ async def stream_rag_response(
     """
     RAG 응답을 SSE 스트리밍으로 전송
     """
+    import asyncio
+
     try:
         # RAG 체인 가져오기
         rag = get_rag_chain()
@@ -352,25 +354,28 @@ async def stream_rag_response(
 
             if chunk_type == "sources":
                 # 참고 문서 정보 전송
-                yield f"data: {json.dumps({'event': 'sources', 'sources': content}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'event': 'sources', 'sources': content})}\n\n"
             elif chunk_type == "web_results":
                 # 웹 검색 결과 전송
-                yield f"data: {json.dumps({'event': 'web_results', 'web_results': content}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'event': 'web_results', 'web_results': content})}\n\n"
             elif chunk_type == "answer":
-                # 답변 청크 전송
-                yield f"data: {json.dumps({'event': 'answer', 'content': content}, ensure_ascii=False)}\n\n"
+                # 답변 청크 전송 (ASCII 이스케이프로 안전하게 전송)
+                data = f"data: {json.dumps({'event': 'answer', 'content': content})}\n\n"
+                yield data
+                # 즉시 플러시를 위해 아주 짧은 대기
+                await asyncio.sleep(0)
             elif chunk_type == "error":
                 # 에러 전송
-                yield f"data: {json.dumps({'event': 'error', 'message': content}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'event': 'error', 'message': content})}\n\n"
 
         # 스트리밍 완료
-        yield f"data: {json.dumps({'event': 'done'}, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps({'event': 'done'})}\n\n"
 
     except Exception as e:
         error_msg = json.dumps({
             "event": "error",
             "message": f"RAG 스트리밍 오류: {str(e)}"
-        }, ensure_ascii=False)
+        })
         yield f"data: {error_msg}\n\n"
 
 
@@ -386,9 +391,9 @@ async def rag_chat_stream(request: ChatRequest):
     4. 실시간 답변 + 참고 문서 반환
     """
     print("\n" + "="*50)
-    print("📥 [RAG Stream] 받은 요청:")
+    print("[RAG Stream] Received request:")
     print(f"  - query: {request.message[:50]}...")
-    print(f"  - history: {len(request.conversation_history) if request.conversation_history else 0}개")
+    print(f"  - history: {len(request.conversation_history) if request.conversation_history else 0} items")
     print("="*50 + "\n")
 
     return StreamingResponse(
@@ -399,9 +404,11 @@ async def rag_chat_stream(request: ChatRequest):
         ),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control": "no-cache, no-transform",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"
+            "X-Accel-Buffering": "no",
+            "Content-Encoding": "none",
+            "Transfer-Encoding": "chunked"
         }
     )
 
@@ -512,7 +519,7 @@ async def miso_chat(request: MisoChatRequest):
     - SSE 스트리밍 응답을 그대로 전달
     """
     print("\n" + "="*50)
-    print("📥 [MISO Proxy] 받은 요청:")
+    print("[MISO Proxy] Received request:")
     print(f"  - query: {request.query[:50]}...")
     print(f"  - conversation_id: {request.conversation_id}")
     print(f"  - user: {request.user}")
