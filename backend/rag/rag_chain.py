@@ -16,6 +16,47 @@ from .mcp_client import TavilyMCPClient
 class RAGChain:
     """RAG 파이프라인 클래스"""
 
+    # ============================================
+    # 시스템 프롬프트 템플릿 (클래스 레벨 상수)
+    # ============================================
+    BASE_SYSTEM_PROMPT = """당신은 상권 분석 및 창업 컨설팅 전문가이자 친근한 대화 상대입니다.
+
+답변 전략:
+1. **부동산/상권 관련 질문**: {context_instruction}
+   - {context_details}
+   - 구체적이고 실용적인 조언 제공
+
+2. **일상적인 대화/인사/잡담**: 참고 자료와 무관하게 자연스럽고 친근하게 응답하세요.
+   - "안녕하세요", "고맙습니다", "오늘 날씨 어때?" 등의 질문에는 일반적인 대화로 응답
+   - 참고 자료를 억지로 언급하지 마세요
+   - 친근하고 따뜻한 톤 유지
+
+출력 스타일 가이드:
+- 마크다운 특수문자(###, ***, ---, ===, ~~~)를 사용하지 마세요
+- 제목이나 강조가 필요할 때는 **굵은 글씨**만 사용하세요
+- 구분선(---, ***)은 사용하지 마세요
+- 목록은 "•" 또는 숫자로 간결하게 표현하세요
+- 문단 구분은 빈 줄 하나로 충분합니다
+- 자연스럽고 읽기 편한 문장으로 작성하세요
+
+사용자의 질문 의도를 파악하여 적절한 방식으로 답변하세요."""
+
+    # 컨텍스트별 instruction
+    CONTEXT_INSTRUCTIONS = {
+        "local": {
+            "instruction": "제공된 참고 문서를 기반으로 전문적이고 구체적인 답변을 제공하세요.",
+            "details": "참고 문서의 내용을 자연스럽게 설명하고, 필요시 출처를 언급하세요. 참고 문서에 없는 내용은 솔직하게 '제공된 자료에는 해당 정보가 없습니다'라고 말하기"
+        },
+        "web": {
+            "instruction": "웹 검색 결과를 기반으로 최신 정보를 반영한 전문적인 답변을 제공하세요.",
+            "details": "웹 검색 결과의 내용을 자연스럽게 설명하고, 필요시 출처(URL)를 언급하세요. 최신 정보를 반영하여 실용적인 조언 제공"
+        },
+        "hybrid": {
+            "instruction": "로컬 지식 데이터베이스와 최신 웹 검색 결과를 모두 활용하여 전문적인 답변을 제공하세요.",
+            "details": "로컬 문서(내부 자료)와 웹 검색 결과(최신 정보)를 균형있게 활용하고, 정보의 출처(로컬 문서 vs 웹)를 명확히 구분하세요. 최신 트렌드와 기본 지식을 결합하여 실용적인 조언 제공"
+        }
+    }
+
     def __init__(
         self,
         openai_api_key: str = None,
@@ -78,6 +119,25 @@ class RAGChain:
 
         print(f"[OK] RAG 파이프라인 준비 완료 (모델: {model_name})")
 
+    def _get_system_prompt(self, mode: str) -> str:
+        """
+        컨텍스트 모드에 맞는 시스템 프롬프트 생성
+
+        Args:
+            mode: "local", "web", "hybrid"
+
+        Returns:
+            완성된 시스템 프롬프트
+        """
+        if mode not in self.CONTEXT_INSTRUCTIONS:
+            raise ValueError(f"Invalid mode: {mode}. Must be one of {list(self.CONTEXT_INSTRUCTIONS.keys())}")
+
+        context_info = self.CONTEXT_INSTRUCTIONS[mode]
+        return self.BASE_SYSTEM_PROMPT.format(
+            context_instruction=context_info["instruction"],
+            context_details=context_info["details"]
+        )
+
     def create_prompt(
         self,
         query: str,
@@ -85,7 +145,7 @@ class RAGChain:
         conversation_history: Optional[List[Dict[str, str]]] = None
     ) -> List[Dict[str, str]]:
         """
-        RAG 프롬프트 생성
+        RAG 프롬프트 생성 (로컬 문서 전용)
 
         Args:
             query: 사용자 질문
@@ -95,16 +155,8 @@ class RAGChain:
         Returns:
             OpenAI 메시지 형식의 프롬프트
         """
-        # 시스템 프롬프트
-        system_prompt = """당신은 상권 분석 및 창업 컨설팅 전문가입니다.
-제공된 참고 문서를 바탕으로 정확하고 유용한 답변을 제공해주세요.
-
-답변 시 주의사항:
-1. 참고 문서의 내용을 기반으로 답변하되, 자연스럽게 설명해주세요.
-2. 참고 문서에 없는 내용은 "제공된 자료에는 해당 정보가 없습니다"라고 명확히 말해주세요.
-3. 가능한 한 구체적이고 실용적인 조언을 제공해주세요.
-4. 필요시 출처를 언급해주세요.
-"""
+        # 시스템 프롬프트 (템플릿 사용)
+        system_prompt = self._get_system_prompt("local")
 
         # 검색된 문서 포맷팅
         context = self.retriever.format_documents_for_prompt(retrieved_docs)
@@ -256,15 +308,8 @@ class RAGChain:
         # 웹 검색 결과를 컨텍스트로 변환
         web_context = self.tavily_mcp.format_search_results_for_prompt(web_results, max_results=3)
 
-        # 시스템 프롬프트
-        system_prompt = """당신은 상권 분석 및 창업 컨설팅 전문가입니다.
-웹 검색 결과를 바탕으로 정확하고 유용한 답변을 제공해주세요.
-
-답변 시 주의사항:
-1. 웹 검색 결과의 내용을 기반으로 답변하되, 자연스럽게 설명해주세요.
-2. 필요시 출처(URL)를 언급해주세요.
-3. 최신 정보를 반영하여 구체적이고 실용적인 조언을 제공해주세요.
-"""
+        # 시스템 프롬프트 (템플릿 사용)
+        system_prompt = self._get_system_prompt("web")
 
         # 사용자 프롬프트
         user_prompt = f"""[웹 검색 결과]
@@ -345,15 +390,8 @@ class RAGChain:
         # 웹 검색 컨텍스트
         web_context = self.tavily_mcp.format_search_results_for_prompt(web_results, max_results=2)
 
-        # 시스템 프롬프트
-        system_prompt = """당신은 상권 분석 및 창업 컨설팅 전문가입니다.
-로컬 지식 데이터베이스와 최신 웹 검색 결과를 모두 활용하여 정확하고 유용한 답변을 제공해주세요.
-
-답변 시 주의사항:
-1. 로컬 문서(내부 자료)와 웹 검색 결과(최신 정보)를 균형있게 활용하세요.
-2. 정보의 출처(로컬 문서 vs 웹)를 명확히 구분해주세요.
-3. 최신 트렌드와 기본 지식을 결합하여 실용적인 조언을 제공하세요.
-"""
+        # 시스템 프롬프트 (템플릿 사용)
+        system_prompt = self._get_system_prompt("hybrid")
 
         # 사용자 프롬프트
         user_prompt = f"""[내부 참고 문서]
@@ -639,15 +677,8 @@ class RAGChain:
         # 웹 검색 결과를 컨텍스트로 변환
         web_context = self.tavily_mcp.format_search_results_for_prompt(web_results, max_results=3)
 
-        # 시스템 프롬프트
-        system_prompt = """당신은 상권 분석 및 창업 컨설팅 전문가입니다.
-웹 검색 결과를 바탕으로 정확하고 유용한 답변을 제공해주세요.
-
-답변 시 주의사항:
-1. 웹 검색 결과의 내용을 기반으로 답변하되, 자연스럽게 설명해주세요.
-2. 필요시 출처(URL)를 언급해주세요.
-3. 최신 정보를 반영하여 구체적이고 실용적인 조언을 제공해주세요.
-"""
+        # 시스템 프롬프트 (템플릿 사용)
+        system_prompt = self._get_system_prompt("web")
 
         # 사용자 프롬프트
         user_prompt = f"""[웹 검색 결과]
@@ -718,15 +749,8 @@ class RAGChain:
         # 웹 검색 컨텍스트
         web_context = self.tavily_mcp.format_search_results_for_prompt(web_results, max_results=2)
 
-        # 시스템 프롬프트
-        system_prompt = """당신은 상권 분석 및 창업 컨설팅 전문가입니다.
-로컬 지식 데이터베이스와 최신 웹 검색 결과를 모두 활용하여 정확하고 유용한 답변을 제공해주세요.
-
-답변 시 주의사항:
-1. 로컬 문서(내부 자료)와 웹 검색 결과(최신 정보)를 균형있게 활용하세요.
-2. 정보의 출처(로컬 문서 vs 웹)를 명확히 구분해주세요.
-3. 최신 트렌드와 기본 지식을 결합하여 실용적인 조언을 제공하세요.
-"""
+        # 시스템 프롬프트 (템플릿 사용)
+        system_prompt = self._get_system_prompt("hybrid")
 
         # 사용자 프롬프트
         user_prompt = f"""[내부 참고 문서]
