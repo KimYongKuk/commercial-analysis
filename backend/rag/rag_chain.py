@@ -100,6 +100,7 @@ class RAGChain:
         # MCP Tool Router 초기화
         self.mcp_tool_router = None
         self.enable_mcp = enable_mcp
+        self.mcp_initialized = False  # MCP 도구 발견 완료 여부
 
         if enable_mcp:
             try:
@@ -108,15 +109,16 @@ class RAGChain:
                 # UniversalMCPClient 초기화 (JSON 설정)
                 self.universal_client = UniversalMCPClient.from_config(mcp_config_path)
 
-                # MCPToolRouter 초기화
+                # MCPToolRouter 초기화 (도구 발견은 나중에)
                 self.mcp_tool_router = MCPToolRouter(
                     openai_api_key=openai_api_key,
                     universal_client=self.universal_client,
                     model_name="gpt-4o-mini",  # Tool selection용 경량 모델
-                    temperature=0.3  # 도구 선택은 낮은 temperature
+                    temperature=0.3,  # 도구 선택은 낮은 temperature
+                    enable_description_enhancement=True  # Description 자동 보강
                 )
 
-                print("[OK] MCP Tool Router 활성화 완료")
+                print("[OK] MCP Tool Router 활성화 완료 (도구 발견은 첫 요청 시 실행)")
             except Exception as e:
                 print(f"[ERROR] MCP Tool Router 초기화 실패: {e}")
                 print("   -> MCP 기능 비활성화")
@@ -269,6 +271,13 @@ class RAGChain:
             }
 
         try:
+            # 첫 요청 시 MCP 도구 자동 발견 (Lazy Loading)
+            if not self.mcp_initialized:
+                print("[RAG] 첫 요청 감지, MCP 도구 자동 발견 시작...")
+                tool_count = await self.mcp_tool_router.initialize()
+                self.mcp_initialized = True
+                print(f"[OK] MCP 도구 발견 완료: {tool_count}개")
+
             result = await self.mcp_tool_router.select_and_execute_mcp_tools(
                 query=query,
                 local_docs=local_docs

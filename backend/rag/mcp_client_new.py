@@ -257,8 +257,9 @@ class ToolSchemaConverter:
         Args:
             mcp_tool: MCP 도구 스키마
             {
+                "server": "tavily",
                 "name": "tavily_search",
-                "description": "...",
+                "description": "Search the web using Tavily API",
                 "inputSchema": {
                     "type": "object",
                     "properties": {...},
@@ -268,6 +269,14 @@ class ToolSchemaConverter:
 
         Returns:
             OpenAI Function 스키마
+            {
+                "type": "function",
+                "function": {
+                    "name": "tavily_search",
+                    "description": "Search the web using Tavily API",
+                    "parameters": {...}
+                }
+            }
         """
         return {
             "type": "function",
@@ -277,6 +286,44 @@ class ToolSchemaConverter:
                 "parameters": mcp_tool.get("inputSchema", {})
             }
         }
+
+    @staticmethod
+    def enhance_tool_description(openai_tool: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        OpenAI Function 스키마의 description을 보강 (선택 사항)
+
+        특정 도구에 대해 LLM이 더 잘 이해할 수 있도록 상세한 가이드 추가
+
+        Args:
+            openai_tool: OpenAI Function 스키마
+
+        Returns:
+            Description이 보강된 OpenAI Function 스키마
+        """
+        tool_name = openai_tool["function"]["name"]
+
+        # Tavily Search에 대한 상세 가이드
+        if tool_name == "tavily_search":
+            openai_tool["function"]["description"] += """
+
+**사용 시점:**
+- 최신 뉴스, 트렌드, 실시간 데이터가 필요한 경우
+- "2025년", "최근", "현재", "요즘" 등의 키워드가 있는 경우
+- 로컬 문서에 없는 최신 정보가 필요한 경우
+
+**사용 안 함:**
+- 로컬 문서로 충분히 답변 가능한 경우
+- 일반적인 가이드, 기본 지식 질문
+- 시간과 무관한 기본 개념 설명
+
+**예시:**
+✅ "2025년 강남 상권 트렌드" → 사용
+✅ "최근 부동산 시장 동향" → 사용
+❌ "카페 창업 기본 가이드" → 사용 안 함 (로컬 문서로 충분)
+❌ "메뉴 가격 책정 방법" → 사용 안 함 (기본 지식)
+"""
+
+        return openai_tool
 
     @staticmethod
     def get_tavily_tools_manual() -> List[Dict[str, Any]]:
@@ -382,7 +429,8 @@ class MCPToolRouter:
         openai_api_key: str,
         universal_client: UniversalMCPClient,
         model_name: str = "gpt-4o-mini",
-        temperature: float = 0.3
+        temperature: float = 0.3,
+        enable_description_enhancement: bool = True
     ):
         """
         Tool Router 초기화
@@ -392,13 +440,75 @@ class MCPToolRouter:
             universal_client: UniversalMCPClient 인스턴스
             model_name: LLM 모델 (도구 선택용)
             temperature: 낮을수록 일관된 선택 (0.0~1.0)
+            enable_description_enhancement: Description 자동 보강 활성화 여부
         """
         self.client = OpenAI(api_key=openai_api_key)
         self.universal_client = universal_client
         self.model_name = model_name
         self.temperature = temperature
+        self.enable_description_enhancement = enable_description_enhancement
+
+        # 자동 발견된 도구 캐싱
+        self.discovered_tools = []
+        self.is_initialized = False
 
         print(f"[MCPToolRouter] 초기화 완료 (모델: {model_name})")
+
+    async def initialize(self):
+        """
+        MCP 도구 자동 발견 및 스키마 변환
+
+        - UniversalMCPClient에서 모든 MCP 서버의 도구 발견
+        - MCP 스키마를 OpenAI Function 스키마로 변환
+        - Description 보강 (선택 사항)
+        - self.discovered_tools에 캐싱
+
+        Returns:
+            발견된 도구 개수
+        """
+        if self.is_initialized:
+            print("[MCPToolRouter] 이미 초기화됨, 건너뛰기")
+            return len(self.discovered_tools)
+
+        print("[MCPToolRouter] MCP 도구 자동 발견 시작...")
+
+        try:
+            # 1. UniversalMCPClient에서 모든 도구 발견
+            mcp_tools = await self.universal_client.discover_all_tools()
+
+            if not mcp_tools or len(mcp_tools) == 0:
+                print("[WARN] MCP 도구를 찾을 수 없음, Fallback으로 수동 정의 사용")
+                self.discovered_tools = ToolSchemaConverter.get_tavily_tools_manual()
+                self.is_initialized = True
+                return len(self.discovered_tools)
+
+            # 2. OpenAI Function 스키마로 변환
+            self.discovered_tools = []
+            for mcp_tool in mcp_tools:
+                # 기본 변환
+                openai_tool = ToolSchemaConverter.mcp_to_openai(mcp_tool)
+
+                # Description 보강 (선택 사항)
+                if self.enable_description_enhancement:
+                    openai_tool = ToolSchemaConverter.enhance_tool_description(openai_tool)
+
+                self.discovered_tools.append(openai_tool)
+
+            self.is_initialized = True
+
+            print(f"[OK] MCPToolRouter 초기화 완료: {len(self.discovered_tools)}개 도구 준비")
+            for tool in self.discovered_tools:
+                tool_name = tool["function"]["name"]
+                print(f"   - {tool_name}")
+
+            return len(self.discovered_tools)
+
+        except Exception as e:
+            print(f"[ERROR] MCP 도구 자동 발견 실패: {e}")
+            print("[WARN] Fallback으로 수동 정의 사용")
+            self.discovered_tools = ToolSchemaConverter.get_tavily_tools_manual()
+            self.is_initialized = True
+            return len(self.discovered_tools)
 
     def _is_simple_query(self, query: str) -> bool:
         """
@@ -539,15 +649,20 @@ class MCPToolRouter:
         # 현재 질문 추가
         messages.append({"role": "user", "content": query})
 
-        # 사용 가능한 도구 목록 (수동 정의 사용)
-        available_tools = ToolSchemaConverter.get_tavily_tools_manual()
+        # 사용 가능한 도구 목록 (자동 발견된 도구 사용)
+        available_tools = self.discovered_tools
+
+        # Fallback: 자동 발견 실패 시 수동 정의 사용
+        if not available_tools or len(available_tools) == 0:
+            print("[WARN] 자동 발견된 도구 없음, Fallback으로 수동 정의 사용")
+            available_tools = ToolSchemaConverter.get_tavily_tools_manual()
 
         # OpenAI Function Calling 실행
         try:
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
-                tools=available_tools,
+                tools=available_tools,  # ✅ 자동 발견된 모든 도구 (Tavily + Brave + ...)
                 tool_choice="auto",  # LLM이 자동 선택
                 temperature=self.temperature
             )

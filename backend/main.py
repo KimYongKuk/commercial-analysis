@@ -50,17 +50,9 @@ async def get_rag_chain():
             temperature=0.7,
             max_tokens=1000
         )
-        
-        # Tool discovery 실행 (비동기적으로)
-        if rag_chain.enable_mcp and rag_chain.universal_client:
-            print("[RAG] MCP 도구 목록 발견 중...")
-            try:
-                tools = await rag_chain.universal_client.discover_all_tools()
-                print(f"[OK] {len(tools)}개 MCP 도구 발견 완료")
-            except Exception as e:
-                print(f"[ERROR] MCP 도구 발견 실패: {e}")
-                
-        print("[OK] RAG system ready!")
+
+        # MCP 도구는 첫 요청 시 자동 발견됩니다 (Lazy Loading in RAGChain)
+        print("[OK] RAG system ready! (MCP 도구는 첫 요청 시 발견됩니다)")
     return rag_chain
 
 # ============================================
